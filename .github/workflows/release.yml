@@ -1,0 +1,60 @@
+name: Release
+
+# Trigger: any tag that looks like a semantic version.
+# Push a tag to start a release:
+#   git tag v1.2.3
+#   git push origin v1.2.3
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"   # v1.0.0, v1.0.0-rc.1, v2.0.0-beta …
+
+permissions:
+  contents: write   # goreleaser needs write access to create the GitHub Release
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout the full history ─────────────────────────────────────
+      # fetch-depth: 0 gives goreleaser the full tag+commit history it needs
+      # to generate accurate changelogs and detect the previous release tag.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Set up Go ─────────────────────────────────────────────────────
+      # The Go version is read from go.mod (toolchain directive).  Caching the
+      # module download cache dramatically speeds up repeated runs.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ── 3. Run tests before releasing ───────────────────────────────────
+      # Never ship a tag without green tests.  goreleaser does not run tests,
+      # so we do it explicitly here.
+      - name: Run Go tests
+        run: go test ./...
+
+      # ── 4. goreleaser ────────────────────────────────────────────────────
+      # goreleaser reads .goreleaser.yaml, cross-compiles all targets defined
+      # in the build matrix, creates archives, computes sha256 checksums, and
+      # publishes the GitHub Release — all in one step.
+      #
+      # GITHUB_TOKEN is automatically provided by Actions; no secret setup
+      # required.  It is used to:
+      #   - Create the GitHub Release
+      #   - Upload all artifacts to the release
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

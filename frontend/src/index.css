@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Prevent text selection drag from triggering the OS window-drag behaviour
+   when the user clicks rapidly on table rows. */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Allow text selection inside the CVE detail drawer so users can copy IDs. */
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Custom scrollbar — matches the dark theme. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4b5563;
+}
+
+/* Wails: prevent the default browser context menu on right-click. */
+body {
+  -webkit-app-region: no-drag;
+}
+
+/* The title bar area can be dragged to move the window. */
+.drag-region {
+  -webkit-app-region: drag;
+}

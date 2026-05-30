@@ -1,0 +1,138 @@
+# .goreleaser.yaml
+# Documentation: https://goreleaser.com/customization/
+#
+# Run locally to verify the config (no release):
+#   goreleaser check          # lint only
+#   goreleaser build --snapshot --clean
+#   goreleaser release --snapshot --clean   # full release, no push
+version: 2
+
+# ── Project metadata ──────────────────────────────────────────────────────────
+project_name: dep-shield
+
+before:
+  hooks:
+    # Ensure the module cache is warm and tidy before building.
+    - go mod tidy
+    - go mod verify
+
+# ── Build matrix ─────────────────────────────────────────────────────────────
+builds:
+  - id: dep-shield
+    # Root main.go imports github.com/dep-shield/dep-shield/cmd — matches the
+    # build command in main.go's package comment.
+    main: .
+    binary: dep-shield
+
+    # Inject the version string at link time so `dep-shield version` prints the
+    # real tag rather than the "dev" fallback.
+    ldflags:
+      - -s -w
+      - -X github.com/dep-shield/dep-shield/cmd.Version={{ .Version }}
+
+    env:
+      - CGO_ENABLED=0   # fully static, no C runtime dependency
+
+    goos:
+      - linux
+      - darwin
+      - windows
+
+    goarch:
+      - amd64
+      - arm64
+
+    # Windows only ships amd64 — arm64 Windows is rare enough that we skip it.
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+    # Reproducible builds: stamp with the commit timestamp.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# ── Archives ─────────────────────────────────────────────────────────────────
+# Each target produces a compressed archive so the binary + any extra files
+# travel together.  install.sh downloads and extracts these archives.
+archives:
+  - id: default
+    # Naming convention used by install.sh to construct the download URL:
+    #   dep-shield_v1.2.3_linux_amd64.tar.gz
+    #   dep-shield_v1.2.3_darwin_arm64.tar.gz
+    #   dep-shield_v1.2.3_windows_amd64.zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    formats: [tar.gz]
+
+    # Files bundled inside every archive.
+    files:
+      - LICENSE*
+      - README.md
+      - install.sh
+
+# ── Checksums ────────────────────────────────────────────────────────────────
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# ── GitHub Release ────────────────────────────────────────────────────────────
+release:
+  github:
+    owner: dep-shield
+    name: dep-shield
+
+  # Populate release notes from the matching section in CHANGELOG.md, falling
+  # back to auto-generated notes when no CHANGELOG is present.
+  header: |
+    ## dep-shield {{ .Version }}
+
+    **Install (Linux/macOS):**
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+    ```
+
+    **Install (Windows — PowerShell):**
+    ```powershell
+    irm https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.ps1 | iex
+    ```
+
+  footer: |
+    ### Verify checksums
+
+    ```bash
+    sha256sum --check checksums.txt
+    ```
+
+  # Publish as a pre-release when the tag contains a pre-release identifier
+  # (e.g. v1.0.0-rc.1).  Full releases are always marked stable.
+  prerelease: auto
+
+  # Don't delete the existing release if re-running goreleaser on the same tag.
+  replace_existing_draft: true
+
+# ── Snapshot config (local testing) ──────────────────────────────────────────
+snapshot:
+  # goreleaser build --snapshot produces binaries named dep-shield-SNAPSHOT-<commit>
+  version_template: "{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}"
+
+# ── Changelog (auto-generated when no CHANGELOG.md section matched) ───────────
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge remote-tracking branch
+  groups:
+    - title: "New features"
+      regexp: "^feat"
+      order: 0
+    - title: "Bug fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "Other changes"
+      order: 999
