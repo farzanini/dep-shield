@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ import (
 	"github.com/dep-shield/dep-shield/internal/cve"
 	"github.com/dep-shield/dep-shield/internal/models"
 	"github.com/dep-shield/dep-shield/internal/parser"
+	"github.com/dep-shield/dep-shield/internal/reporter"
 	"github.com/dep-shield/dep-shield/internal/scanner"
 	"github.com/dep-shield/dep-shield/internal/scorer"
 )
@@ -63,8 +65,8 @@ type ScanProgress struct {
 // fields computed by the scorer so the frontend never needs to join data.
 type ScoredVuln struct {
 	ID                 string   `json:"id"`
-	CVE                string   `json:"cve"`     // "CVE-2021-44228" or "" for GHSA-only entries
-	Severity           string   `json:"severity"` // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN"
+	CVE                string   `json:"cve"`         // "CVE-2021-44228" or "" for GHSA-only entries
+	Severity           string   `json:"severity"`    // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN"
 	CVSS               float64  `json:"cvss"`
 	NormScore          float64  `json:"normScore"`
 	Package            string   `json:"package"`
@@ -76,6 +78,8 @@ type ScoredVuln struct {
 	Summary            string   `json:"summary"`
 	References         []string `json:"references"`
 	DaysSincePublished int      `json:"daysSincePublished"`
+	Source             string   `json:"source"`      // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
+	SourceLabel        string   `json:"sourceLabel"` // human-readable label
 }
 
 // FixSuggestion is returned by GetSuggestedFix.
@@ -172,6 +176,165 @@ func (a *App) GetResults() []ScoredVuln {
 // Used by the frontend to let users navigate to CVE references.
 func (a *App) OpenInBrowser(url string) {
 	wailsrt.BrowserOpenURL(a.ctx, url)
+}
+
+// SelectDirectory shows a native OS folder-picker dialog and returns the
+// selected path, or "" if the user cancelled.
+func (a *App) SelectDirectory() (string, error) {
+	home, _ := os.UserHomeDir()
+	dir, err := wailsrt.OpenDirectoryDialog(a.ctx, wailsrt.OpenDialogOptions{
+		Title:            "Select project directory",
+		DefaultDirectory: home,
+	})
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// RepoHit describes one package-repository directory found by DiscoverRepos.
+type RepoHit struct {
+	Path      string `json:"path"`
+	Ecosystem string `json:"ecosystem"` // "npm" | "Go" | "crates.io" | "PyPI" | "RubyGems"
+	Label     string `json:"label"`     // short human description
+}
+
+// DiscoverRepos does a shallow walk of root looking for package-repository
+// directories or lockfiles and returns them sorted by path.
+// Depth is limited to 6 levels so it remains fast even on large trees.
+// Returns an error if root does not exist or cannot be read.
+func (a *App) DiscoverRepos(root string) ([]RepoHit, error) {
+	// Expand ~ and $HOME/$USERPROFILE.
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		root = strings.ReplaceAll(root, "~", home)
+	}
+	root = os.ExpandEnv(root)
+
+	if _, err := os.Stat(root); err != nil {
+		return nil, fmt.Errorf("path does not exist: %s", root)
+	}
+
+	var hits []RepoHit
+	seen := map[string]bool{}
+
+	const maxDepth = 6
+
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth > maxDepth {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			full := filepath.Join(dir, name)
+
+			// Skip hidden dirs (except known package-cache parents) and
+			// common noise directories that would slow down the walk.
+			if name == ".git" || name == ".idea" || name == "__pycache__" ||
+				name == ".DS_Store" || name == "dist" || name == "build" ||
+				name == ".cache" || name == "tmp" || name == "temp" {
+				continue
+			}
+
+			if !e.IsDir() {
+				// Detect lockfiles in the current dir.
+				switch name {
+				case "go.mod":
+					if !seen[dir] {
+						seen[dir] = true
+						hits = append(hits, RepoHit{Path: dir, Ecosystem: "Go", Label: "Go module"})
+					}
+				case "package-lock.json", "yarn.lock", "pnpm-lock.yaml":
+					if !seen[dir] {
+						seen[dir] = true
+						hits = append(hits, RepoHit{Path: dir, Ecosystem: "npm", Label: "Node project (lockfile)"})
+					}
+				case "Cargo.lock":
+					if !seen[dir] {
+						seen[dir] = true
+						hits = append(hits, RepoHit{Path: dir, Ecosystem: "crates.io", Label: "Rust project"})
+					}
+				case "requirements.txt", "Pipfile.lock", "pyproject.toml":
+					if !seen[dir] {
+						seen[dir] = true
+						hits = append(hits, RepoHit{Path: dir, Ecosystem: "PyPI", Label: "Python project"})
+					}
+				case "Gemfile.lock":
+					if !seen[dir] {
+						seen[dir] = true
+						hits = append(hits, RepoHit{Path: dir, Ecosystem: "RubyGems", Label: "Ruby project"})
+					}
+				}
+				continue
+			}
+
+			// Detect package-store directories by name.
+			switch name {
+			case "node_modules":
+				if !seen[full] {
+					seen[full] = true
+					src, lbl := deriveSource(full)
+					_ = src
+					hits = append(hits, RepoHit{Path: full, Ecosystem: "npm", Label: lbl + " (node_modules)"})
+				}
+				// Don't recurse into node_modules — it can be enormous.
+				continue
+			case "vendor":
+				// vendor alongside go.mod = Go vendor tree.
+				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+					if !seen[full] {
+						seen[full] = true
+						hits = append(hits, RepoHit{Path: full, Ecosystem: "Go", Label: "Go vendor"})
+					}
+					continue
+				}
+			case "site-packages", ".venv":
+				if !seen[full] {
+					seen[full] = true
+					hits = append(hits, RepoHit{Path: full, Ecosystem: "PyPI", Label: "Python virtualenv"})
+				}
+				continue
+			}
+
+			walk(full, depth+1)
+		}
+	}
+
+	walk(root, 0)
+	return hits, nil
+}
+
+// ExportReport prompts the user for a save location and writes an HTML report.
+// Returns the path written on success, or an empty string if the user cancelled.
+func (a *App) ExportReport() string {
+	dest, err := wailsrt.SaveFileDialog(a.ctx, wailsrt.SaveDialogOptions{
+		Title:           "Export vulnerability report",
+		DefaultFilename: "dep-shield-report.html",
+		Filters: []wailsrt.FileFilter{
+			{DisplayName: "HTML files", Pattern: "*.html"},
+		},
+	})
+	if err != nil || dest == "" {
+		return ""
+	}
+
+	a.mu.RLock()
+	vulns := make([]models.Vulnerability, len(a.results))
+	copy(vulns, a.results)
+	a.mu.RUnlock()
+
+	rpt := reporter.New(reporter.Options{Format: string(reporter.FormatHTML), Log: a.log})
+	result := models.ScanResult{Vulnerabilities: vulns, TotalPackages: len(vulns)}
+	if err := rpt.WriteFile(dest, reporter.FormatHTML, result); err != nil {
+		a.log.Error("ExportReport WriteFile failed", zap.Error(err))
+		return ""
+	}
+	return dest
 }
 
 // GetSuggestedFix returns a FixSuggestion for the given package+version.
@@ -384,6 +547,34 @@ func (a *App) runScan(ctx context.Context, path string) {
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
+// deriveSource classifies a package path into a source type and human label.
+// Because scanner.DirHit only carries Path+Ecosystem, we re-derive the source
+// from well-known path patterns rather than touching internal/.
+func deriveSource(path string) (source, label string) {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.Contains(lower, "/.vscode/extensions") ||
+		strings.Contains(lower, `\.vscode\extensions`):
+		return "vscode-ext", "VS Code extension"
+	case strings.Contains(lower, "/.cursor/extensions") ||
+		strings.Contains(lower, `\.cursor\extensions`):
+		return "cursor-ext", "Cursor extension"
+	case strings.Contains(lower, "/go/pkg/mod") ||
+		strings.Contains(lower, `\go\pkg\mod`) ||
+		strings.Contains(lower, "/.cargo/registry") ||
+		strings.Contains(lower, `\.cargo\registry`) ||
+		strings.Contains(lower, "/.npm/_npx") ||
+		strings.Contains(lower, "/site-packages"):
+		return "global", "Global cache"
+	case strings.Contains(lower, "/usr/") ||
+		strings.Contains(lower, "/opt/") ||
+		strings.Contains(lower, `/windows/`):
+		return "system", "System"
+	default:
+		return "project", "Project"
+	}
+}
+
 // toScoredVuln flattens a models.Vulnerability into the JSON type the
 // frontend consumes.
 func toScoredVuln(v models.Vulnerability) ScoredVuln {
@@ -420,20 +611,24 @@ func toScoredVuln(v models.Vulnerability) ScoredVuln {
 		refs = []string{}
 	}
 
+	src, srcLabel := deriveSource(v.AffectedPkg.Path)
+
 	return ScoredVuln{
-		ID:        v.ID,
-		CVE:       cveID,
-		Severity:  string(v.Severity),
-		CVSS:      v.CVSS,
-		NormScore: v.CVSS, // scorer currently stores NormalisedScore back through Vulnerability
-		Package:   v.AffectedPkg.Name,
-		Version:   v.AffectedPkg.Version,
-		Ecosystem: string(v.AffectedPkg.Ecosystem),
-		FixedIn:   v.FixedIn,
-		HasFix:    v.FixedIn != "",
-		FixAdvice: buildAdvice(v),
-		Summary:   v.Summary,
-		References: refs,
+		ID:          v.ID,
+		CVE:         cveID,
+		Severity:    string(v.Severity),
+		CVSS:        v.CVSS,
+		NormScore:   v.CVSS, // scorer currently stores NormalisedScore back through Vulnerability
+		Package:     v.AffectedPkg.Name,
+		Version:     v.AffectedPkg.Version,
+		Ecosystem:   string(v.AffectedPkg.Ecosystem),
+		FixedIn:     v.FixedIn,
+		HasFix:      v.FixedIn != "",
+		FixAdvice:   buildAdvice(v),
+		Summary:     v.Summary,
+		References:  refs,
+		Source:      src,
+		SourceLabel: srcLabel,
 	}
 }
 

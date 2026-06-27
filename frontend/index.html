@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Prevent the Wails webview from showing a white flash on load -->
     <style>html,body{background:#111827;}</style>
+    <!-- Apply dark class before first paint to avoid FOUC -->
+    <script>
+      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
     <title>dep-shield</title>
   </head>
   <body class="h-full bg-gray-900 text-gray-100 antialiased">

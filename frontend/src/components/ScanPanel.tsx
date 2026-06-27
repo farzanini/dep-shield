@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react';
-import { StartScan } from '../wailsjs/go/main/App';
-import type { ScanProgress } from '../wailsjs/go/main/App';
+import { useEffect, useRef, useState } from 'react';
+import { StartScan, SelectDirectory, DiscoverRepos, isBridgeAvailable, isMethodAvailable } from '../wailsjs/go/main/App';
+import type { ScanProgress, RepoHit } from '../wailsjs/go/main/App';
 
 interface Props {
   phase: 'idle' | 'scanning' | 'done' | 'error';
@@ -8,12 +8,144 @@ interface Props {
   onScanStart: () => void;
 }
 
+// ── Bridge status detection ───────────────────────────────────────────────────
+
+type BridgeStatus =
+  | 'checking'         // still polling — don't show banner yet
+  | 'ok'               // all methods available
+  | 'missing-methods'  // bridge exists but new methods not registered (needs restart)
+  | 'unavailable';     // window.go absent after exhausting retries (browser tab)
+
+function detectBridge(): Exclude<BridgeStatus, 'checking'> {
+  if (!isBridgeAvailable()) return 'unavailable';
+  if (!isMethodAvailable('SelectDirectory') || !isMethodAvailable('DiscoverRepos')) {
+    return 'missing-methods';
+  }
+  return 'ok';
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export default function ScanPanel({ phase, progress, onScanStart }: Props) {
+  // Start as 'checking' so we never flash the error banner on first render.
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('checking');
   const [path, setPath] = useState('');
   const [validationError, setValidationError] = useState('');
+  const [discovering, setDiscovering] = useState(false);
+  const [repos, setRepos] = useState<RepoHit[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [discoverError, setDiscoverError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   const isScanning = phase === 'scanning';
+
+  // Poll for window.go — Wails v2 injects the bridge asynchronously in dev
+  // mode via a WebSocket handshake, so it may not exist on first render.
+  const recheckBridge = () => setBridgeStatus(detectBridge());
+
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+    const MAX = 20;       // up to 6 seconds total
+    const DELAY = 300;    // ms between attempts
+
+    const tick = () => {
+      if (cancelled) return;
+      const s = detectBridge();
+      if (s === 'ok' || attempts >= MAX) {
+        setBridgeStatus(s);
+        return;
+      }
+      attempts++;
+      setTimeout(tick, DELAY);
+    };
+
+    // Small head-start so Wails has time to inject window.go before first check.
+    const t = setTimeout(tick, 150);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, []);
+
+  // ── Path helpers ───────────────────────────────────────────────────────────
+
+  const setPathAndReset = (p: string) => {
+    setPath(p);
+    setValidationError('');
+    setRepos([]);
+    setSelected(new Set());
+    setDiscoverError('');
+  };
+
+  const handleBrowse = async () => {
+    // Re-check bridge on every click — covers the case where Wails finished
+    // injecting window.go after our initial polling window ended.
+    const current = detectBridge();
+    if (current !== 'ok') { setBridgeStatus(current); return; }
+    setBridgeStatus('ok');
+    try {
+      const dir = await SelectDirectory();
+      if (dir) setPathAndReset(dir);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith('bridge-unavailable') || msg.startsWith('method-not-found')) {
+        setBridgeStatus(detectBridge());
+      } else {
+        setValidationError('Could not open folder picker — try typing the path instead.');
+      }
+    }
+  };
+
+  const handleDiscover = async () => {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      setValidationError('Enter or browse to a directory first.');
+      inputRef.current?.focus();
+      return;
+    }
+    setValidationError('');
+    setDiscoverError('');
+    setRepos([]);
+    setSelected(new Set());
+    // Re-check bridge on every click.
+    const current = detectBridge();
+    if (current !== 'ok') { setBridgeStatus(current); return; }
+    setBridgeStatus('ok');
+
+    setDiscovering(true);
+    try {
+      const hits = await DiscoverRepos(trimmed);
+      if (hits && hits.length > 0) {
+        setRepos(hits);
+        setSelected(new Set(hits.map((h) => h.path)));
+      } else {
+        setDiscoverError('No package repositories found. Try a broader directory.');
+      }
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      if (raw.startsWith('bridge-unavailable') || raw.startsWith('method-not-found')) {
+        setBridgeStatus(detectBridge());
+      } else {
+        setDiscoverError(raw);
+      }
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const toggleRepo = (p: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  };
+
+  const toggleAll = () =>
+    setSelected((prev) =>
+      prev.size === repos.length ? new Set() : new Set(repos.map((r) => r.path)),
+    );
+
+  // ── Scan ───────────────────────────────────────────────────────────────────
 
   const handleScan = async () => {
     const trimmed = path.trim();
@@ -22,16 +154,21 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
       inputRef.current?.focus();
       return;
     }
+    if (repos.length > 0 && selected.size === 0) {
+      setValidationError('Select at least one repository to scan.');
+      return;
+    }
     setValidationError('');
-    onScanStart();           // update parent state first
-    await StartScan(trimmed); // fire-and-forget; events drive the rest
+    onScanStart();
+    await StartScan(trimmed);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !isScanning) void handleScan();
   };
 
-  // ── Progress bar ────────────────────────────────────────────────────────────
+  // ── Progress ───────────────────────────────────────────────────────────────
+
   const pct = progress?.percent ?? 0;
   const phaseLabels: Record<string, string> = {
     walking:  'Walking filesystem…',
@@ -44,60 +181,141 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Section label */}
       <div>
         <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-500">
           Scan target
         </h2>
       </div>
 
-      {/* Path input */}
+      {/* ── Bridge status banner ─────────────────────────────────────────────── */}
+      {bridgeStatus !== 'ok' && bridgeStatus !== 'checking' && (
+        <BridgeBanner status={bridgeStatus} onRetry={recheckBridge} />
+      )}
+
+      {/* ── Path input + Browse ──────────────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
         <label className="text-xs text-gray-400" htmlFor="scan-path">
           Directory path
         </label>
+
         <div className="flex gap-2">
           <input
             id="scan-path"
             ref={inputRef}
             type="text"
             value={path}
-            onChange={(e) => {
-              setPath(e.target.value);
-              if (validationError) setValidationError('');
-            }}
+            onChange={(e) => setPathAndReset(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="/Users/me/my-project"
             disabled={isScanning}
             spellCheck={false}
             className={[
-              'selectable flex-1 rounded-md border bg-gray-900 px-3 py-2',
+              'selectable min-w-0 flex-1 rounded-md border bg-gray-900 px-3 py-2',
               'text-sm text-gray-200 placeholder:text-gray-600',
               'focus:outline-none focus:ring-1',
               validationError
                 ? 'border-red-600 focus:ring-red-600'
                 : 'border-gray-700 focus:ring-blue-500',
-              isScanning ? 'opacity-50 cursor-not-allowed' : '',
+              isScanning ? 'cursor-not-allowed opacity-50' : '',
             ].join(' ')}
           />
+
+          {/* Browse */}
           <button
-            onClick={() => setPath('')}
-            disabled={isScanning || !path}
-            title="Clear"
-            className="rounded-md border border-gray-700 bg-gray-900 px-2 text-gray-500 hover:text-gray-300 disabled:opacity-30"
+            onClick={() => void handleBrowse()}
+            disabled={isScanning}
+            className="flex items-center gap-1.5 rounded-md border border-gray-700 bg-gray-900 px-2.5 text-xs text-gray-400 hover:border-gray-500 hover:text-gray-200 disabled:cursor-not-allowed disabled:opacity-30"
           >
-            ✕
+            <FolderIcon className="h-3.5 w-3.5" />
+            Browse
           </button>
+
+          {/* Clear */}
+          {path && !isScanning && (
+            <button
+              onClick={() => setPathAndReset('')}
+              title="Clear"
+              className="rounded-md border border-gray-700 bg-gray-900 px-2 text-gray-500 hover:text-gray-300"
+            >
+              ✕
+            </button>
+          )}
         </div>
+
         {validationError && (
           <p className="text-xs text-red-400">{validationError}</p>
         )}
         <p className="text-xs text-gray-600">
-          Tip: use <code className="text-gray-500">~</code> for your home directory.
+          Type a path or click <span className="text-gray-500">Browse</span> to pick a folder.
         </p>
       </div>
 
-      {/* Scan button */}
+      {/* ── Discover button ──────────────────────────────────────────────────── */}
+      <button
+        onClick={() => void handleDiscover()}
+        disabled={isScanning || discovering}
+        className={[
+          'flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors',
+          'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-800',
+          isScanning
+            ? 'cursor-not-allowed border-gray-700 bg-transparent text-gray-600'
+            : discovering
+            ? 'cursor-wait border-blue-800 bg-blue-950/40 text-blue-400'
+            : 'border-gray-600 bg-gray-800 text-gray-300 hover:border-gray-500 hover:text-white',
+        ].join(' ')}
+      >
+        {discovering ? (
+          <>
+            <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
+            Discovering…
+          </>
+        ) : (
+          <>
+            <RadarIcon className="h-3.5 w-3.5" />
+            Discover repositories
+          </>
+        )}
+      </button>
+
+      {/* ── Discover error ───────────────────────────────────────────────────── */}
+      {discoverError && (
+        <p className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-xs text-amber-400">
+          {discoverError}
+        </p>
+      )}
+
+      {/* ── Discovered repos ─────────────────────────────────────────────────── */}
+      {repos.length > 0 && (
+        <div className="flex flex-col gap-2 animate-fade-in">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+              {repos.length} {repos.length === 1 ? 'repo' : 'repos'} found
+            </span>
+            <button onClick={toggleAll} className="text-xs text-blue-400 hover:text-blue-300">
+              {selected.size === repos.length ? 'Deselect all' : 'Select all'}
+            </button>
+          </div>
+
+          <div className="flex max-h-52 flex-col gap-0.5 overflow-y-auto rounded-md border border-gray-700 bg-gray-800/50 p-1">
+            {repos.map((repo) => (
+              <RepoItem
+                key={repo.path}
+                repo={repo}
+                checked={selected.has(repo.path)}
+                onToggle={() => toggleRepo(repo.path)}
+              />
+            ))}
+          </div>
+
+          {selected.size > 0 && (
+            <p className="text-xs text-gray-600">
+              {selected.size} of {repos.length} selected · scan covers the root path above.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Scan button ──────────────────────────────────────────────────────── */}
       <button
         onClick={() => void handleScan()}
         disabled={isScanning}
@@ -122,53 +340,35 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
         )}
       </button>
 
-      {/* Progress block */}
+      {/* ── Progress block ───────────────────────────────────────────────────── */}
       {(isScanning || phase === 'done') && progress && (
         <div className="flex flex-col gap-2 animate-fade-in">
-          {/* Phase label + percentage */}
           <div className="flex items-center justify-between">
             <span className="text-xs text-gray-400">
               {phaseLabels[progress.phase] ?? progress.phase}
             </span>
-            <span className="text-xs tabular-nums text-gray-500">
-              {Math.round(pct)}%
-            </span>
+            <span className="text-xs tabular-nums text-gray-500">{Math.round(pct)}%</span>
           </div>
-
-          {/* Progress bar */}
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-700">
             <div
               className="h-full rounded-full bg-blue-500 transition-all duration-300"
               style={{ width: `${pct}%` }}
             />
           </div>
-
-          {/* Stats row */}
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
-            {progress.found > 0 && (
-              <StatChip label="dirs" value={progress.found} />
-            )}
-            {progress.parsed > 0 && (
-              <StatChip label="pkgs" value={progress.parsed} />
-            )}
-            {progress.queried > 0 && (
-              <StatChip label="CVEs" value={progress.queried} color="text-amber-500" />
-            )}
+            {progress.found > 0  && <StatChip label="dirs" value={progress.found} />}
+            {progress.parsed > 0 && <StatChip label="pkgs" value={progress.parsed} />}
+            {progress.queried > 0 && <StatChip label="CVEs" value={progress.queried} color="text-amber-500" />}
           </div>
-
-          {/* Current path — truncate in the middle */}
           {progress.current && (
-            <p
-              className="truncate text-xs text-gray-600"
-              title={progress.current}
-            >
+            <p className="truncate text-xs text-gray-600" title={progress.current}>
               {truncateMiddle(progress.current, 34)}
             </p>
           )}
         </div>
       )}
 
-      {/* Error state */}
+      {/* ── Error state ──────────────────────────────────────────────────────── */}
       {phase === 'error' && progress?.error && (
         <div className="rounded-md border border-red-900 bg-red-950 p-3 text-xs text-red-400 selectable">
           {progress.error}
@@ -178,22 +378,93 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
   );
 }
 
+// ── BridgeBanner ──────────────────────────────────────────────────────────────
+
+function BridgeBanner({ status, onRetry }: { status: BridgeStatus; onRetry: () => void }) {
+  const isUnavailable = status === 'unavailable';
+
+  return (
+    <div className="rounded-md border border-yellow-800 bg-yellow-950/40 px-3 py-2.5">
+      <div className="flex items-start gap-2.5">
+        <WarnIcon className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-yellow-500" />
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium text-yellow-300">
+            {isUnavailable ? 'Go bridge not detected yet' : 'App needs a restart'}
+          </p>
+          <p className="mt-0.5 text-xs text-yellow-600">
+            {isUnavailable
+              ? 'Wails may still be connecting. Click Retry — if it keeps failing, make sure you\'re using the desktop window, not a browser tab.'
+              : 'New Go methods (Browse, Discover) were added since the app last started. Restart to pick them up.'}
+          </p>
+          <p className="mt-1.5 rounded bg-gray-900/60 px-2 py-1 font-mono text-xs text-gray-400">
+            GONOSUMDB='*' GONOSUMCHECK='*' wails dev
+          </p>
+        </div>
+      </div>
+      <button
+        onClick={onRetry}
+        className="mt-2.5 w-full rounded border border-yellow-800 bg-yellow-950/60 py-1 text-xs font-medium text-yellow-400 hover:bg-yellow-900/40 hover:text-yellow-200 transition-colors"
+      >
+        ↻ Retry bridge detection
+      </button>
+    </div>
+  );
+}
+
+// ── RepoItem ──────────────────────────────────────────────────────────────────
+
+const ECO_COLOR: Record<string, string> = {
+  npm:         'text-green-400',
+  Go:          'text-cyan-400',
+  'crates.io': 'text-orange-400',
+  PyPI:        'text-yellow-400',
+  RubyGems:   'text-red-400',
+};
+
+function RepoItem({
+  repo, checked, onToggle,
+}: {
+  repo: RepoHit;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label
+      className={[
+        'flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 text-xs transition-colors',
+        checked ? 'bg-blue-950/30' : 'hover:bg-gray-700/40',
+      ].join(' ')}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onToggle}
+        className="mt-0.5 flex-shrink-0 accent-blue-500"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className={`font-semibold ${ECO_COLOR[repo.ecosystem] ?? 'text-gray-400'}`}>
+            {repo.ecosystem}
+          </span>
+          <span className="text-gray-600">·</span>
+          <span className="text-gray-400">{repo.label}</span>
+        </div>
+        <p className="mt-0.5 truncate font-mono text-gray-600" title={repo.path}>
+          {truncateMiddle(repo.path, 30)}
+        </p>
+      </div>
+    </label>
+  );
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function StatChip({
-  label,
-  value,
-  color = 'text-gray-400',
-}: {
-  label: string;
-  value: number;
-  color?: string;
+function StatChip({ label, value, color = 'text-gray-400' }: {
+  label: string; value: number; color?: string;
 }) {
   return (
     <span>
-      <span className={`font-semibold tabular-nums ${color}`}>
-        {value.toLocaleString()}
-      </span>{' '}
+      <span className={`font-semibold tabular-nums ${color}`}>{value.toLocaleString()}</span>{' '}
       {label}
     </span>
   );
@@ -209,6 +480,26 @@ function truncateMiddle(str: string, maxLen: number): string {
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
+function FolderIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+    </svg>
+  );
+}
+
+function RadarIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3a9 9 0 100 18A9 9 0 0012 3z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 7a5 5 0 100 10A5 5 0 0012 7z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 12l4.5-4.5" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ScanIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -221,10 +512,18 @@ function ScanIcon({ className }: { className?: string }) {
 function SpinnerIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10"
-        stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor"
-        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
+function WarnIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path fillRule="evenodd"
+        d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z"
+        clipRule="evenodd" />
     </svg>
   );
 }

@@ -5,6 +5,7 @@ import type { ScanProgress, ScoredVuln } from './wailsjs/go/main/App';
 import ScanPanel from './components/ScanPanel';
 import SummaryBar from './components/SummaryBar';
 import ResultsTable from './components/ResultsTable';
+import type { PackageRow } from './components/ResultsTable';
 import CVEDetail from './components/CVEDetail';
 
 // ── App state machine ─────────────────────────────────────────────────────────
@@ -29,7 +30,7 @@ const INITIAL_STATE: AppState = {
 
 export default function App() {
   const [state, setState] = useState<AppState>(INITIAL_STATE);
-  const [selectedVuln, setSelectedVuln] = useState<ScoredVuln | null>(null);
+  const [selectedPkg, setSelectedPkg] = useState<PackageRow | null>(null);
   // Keep a ref to the cleanup functions returned by EventsOn so we can
   // remove listeners when the scan ends or the component unmounts.
   const cleanupRef = useRef<Array<() => void>>([]);
@@ -62,7 +63,7 @@ export default function App() {
   const handleScanStart = useCallback(() => {
     // Tear down any previous event listeners.
     clearListeners();
-    setSelectedVuln(null);
+    setSelectedPkg(null);
     setState({ phase: 'scanning', progress: null, results: [], errorMsg: '' });
 
     // Wire up progress stream.
@@ -145,18 +146,17 @@ export default function App() {
           {phase === 'done' && results.length > 0 ? (
             <ResultsTable
               vulns={results}
-              selected={selectedVuln}
-              onSelect={setSelectedVuln}
+              onSelectPackage={setSelectedPkg}
             />
           ) : (
             <EmptyState phase={phase} progress={progress} />
           )}
 
           {/* CVE detail drawer — slides in from the right over the table */}
-          {selectedVuln && (
+          {selectedPkg && (
             <CVEDetail
-              vuln={selectedVuln}
-              onClose={() => setSelectedVuln(null)}
+              pkg={selectedPkg}
+              onClose={() => setSelectedPkg(null)}
             />
           )}
         </div>

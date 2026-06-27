@@ -39,6 +39,8 @@ export interface ScoredVuln {
   summary: string;
   references: string[];
   daysSincePublished: number;
+  source: string;            // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
+  sourceLabel: string;       // human-readable label
 }
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
@@ -54,16 +56,36 @@ export interface FixSuggestion {
 
 // ── Bridge helpers ────────────────────────────────────────────────────────────
 
+/** Returns true when the Wails Go bridge is available (i.e. running inside the desktop app). */
+export function isBridgeAvailable(): boolean {
+  return typeof window !== 'undefined' && !!window.go?.['main']?.['App'];
+}
+
+/** Returns true when a specific Go method is registered on the bound App. */
+export function isMethodAvailable(method: string): boolean {
+  const app = window.go?.['main']?.['App'] as Record<string, unknown> | undefined;
+  return typeof app?.[method] === 'function';
+}
+
 /** Call a bound Go method via the Wails IPC bridge. */
 function call<T>(method: string, ...args: unknown[]): Promise<T> {
   const ns = window.go?.['main'];
   const app = ns?.['App'] as Record<string, (...a: unknown[]) => Promise<unknown>> | undefined;
   if (!app) {
-    return Promise.reject(
-      new Error('[wails] Go bridge not available — is the app running inside Wails?'),
-    );
+    return Promise.reject(new Error('bridge-unavailable'));
   }
-  return app[method]?.(...args) as Promise<T>;
+  const fn = app[method];
+  if (typeof fn !== 'function') {
+    return Promise.reject(new Error(`method-not-found:${method}`));
+  }
+  return fn(...args) as Promise<T>;
+}
+
+/** One package-repository directory found by DiscoverRepos. */
+export interface RepoHit {
+  path: string;
+  ecosystem: string; // "npm" | "Go" | "crates.io" | "PyPI" | "RubyGems"
+  label: string;     // human-readable description
 }
 
 // ── Exported method bindings ─────────────────────────────────────────────────
@@ -100,4 +122,30 @@ export function GetSuggestedFix(
   version: string,
 ): Promise<FixSuggestion> {
   return call<FixSuggestion>('GetSuggestedFix', pkgName, version);
+}
+
+/**
+ * ExportReport shows a save-file dialog and writes an HTML vulnerability report.
+ * Returns the path written, or an empty string if the user cancelled.
+ */
+export function ExportReport(): Promise<string> {
+  return call<string>('ExportReport');
+}
+
+/**
+ * SelectDirectory shows a native OS folder-picker dialog.
+ * Returns the selected path, or "" if the user cancelled.
+ */
+export function SelectDirectory(): Promise<string> {
+  // Wails unwraps (string, error) — the promise resolves to string or rejects with the error.
+  return call<string>('SelectDirectory');
+}
+
+/**
+ * DiscoverRepos walks root (up to 6 levels deep) looking for package
+ * repositories and returns a list of hits, or rejects with a descriptive error.
+ */
+export function DiscoverRepos(root: string): Promise<RepoHit[]> {
+  // Wails unwraps ([]RepoHit, error) — rejects on Go error.
+  return call<RepoHit[]>('DiscoverRepos', root);
 }
