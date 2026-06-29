@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { StartScan, SelectDirectory, DiscoverRepos, isBridgeAvailable, isMethodAvailable } from '../wailsjs/go/main/App';
-import type { ScanProgress, RepoHit } from '../wailsjs/go/main/App';
+import { StartScan, SelectDirectory, DiscoverRepos, CommonLocations, isBridgeAvailable, isMethodAvailable } from '../wailsjs/go/main/App';
+import type { ScanProgress, RepoHit, LocationHint } from '../wailsjs/go/main/App';
 
 interface Props {
   phase: 'idle' | 'scanning' | 'done' | 'error';
@@ -35,6 +35,10 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
   const [repos, setRepos] = useState<RepoHit[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [discoverError, setDiscoverError] = useState('');
+  const [locations, setLocations] = useState<LocationHint[]>([]);
+  const [showLocations, setShowLocations] = useState(false);
+  const [locationsLoading, setLocationsLoading] = useState(false);
+  const [locationsLoaded, setLocationsLoaded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const isScanning = phase === 'scanning';
@@ -94,13 +98,10 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
     }
   };
 
-  const handleDiscover = async () => {
-    const trimmed = path.trim();
-    if (!trimmed) {
-      setValidationError('Enter or browse to a directory first.');
-      inputRef.current?.focus();
-      return;
-    }
+  // Core discovery against an explicit target path. Shared by the Discover
+  // button and the common-location chips (which pass their own path so they
+  // don't race the async `path` state update).
+  const runDiscover = async (target: string) => {
     setValidationError('');
     setDiscoverError('');
     setRepos([]);
@@ -112,7 +113,7 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
 
     setDiscovering(true);
     try {
-      const hits = await DiscoverRepos(trimmed);
+      const hits = await DiscoverRepos(target);
       if (hits && hits.length > 0) {
         setRepos(hits);
         setSelected(new Set(hits.map((h) => h.path)));
@@ -129,6 +130,49 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
     } finally {
       setDiscovering(false);
     }
+  };
+
+  const handleDiscover = async () => {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      setValidationError('Enter or browse to a directory first.');
+      inputRef.current?.focus();
+      return;
+    }
+    await runDiscover(trimmed);
+  };
+
+  // Common dependency locations (VS Code extensions, global npm, …). Loaded
+  // lazily the first time the user expands the helper, since it needs the Go
+  // bridge to stat the filesystem.
+  const toggleLocations = async () => {
+    const next = !showLocations;
+    setShowLocations(next);
+    if (!next || locationsLoaded || locationsLoading) return;
+
+    const current = detectBridge();
+    if (current !== 'ok' || !isMethodAvailable('CommonLocations')) {
+      // Stale app or browser tab: surface the restart banner instead of failing silently.
+      setBridgeStatus(current === 'ok' ? 'missing-methods' : current);
+      return;
+    }
+
+    setLocationsLoading(true);
+    try {
+      const locs = await CommonLocations();
+      setLocations(locs ?? []);
+      setLocationsLoaded(true);
+    } catch {
+      setLocations([]);
+      setLocationsLoaded(true);
+    } finally {
+      setLocationsLoading(false);
+    }
+  };
+
+  const selectLocation = (loc: LocationHint) => {
+    setPathAndReset(loc.path);
+    void runDiscover(loc.path);
   };
 
   const toggleRepo = (p: string) => {
@@ -182,7 +226,7 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-500">
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-gray-300">
           Scan target
         </h2>
       </div>
@@ -245,9 +289,62 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
         {validationError && (
           <p className="text-xs text-red-400">{validationError}</p>
         )}
-        <p className="text-xs text-gray-600">
-          Type a path or click <span className="text-gray-500">Browse</span> to pick a folder.
+        <p className="text-xs text-gray-400">
+          Type a path or click <span className="text-gray-200">Browse</span> to pick a folder.
         </p>
+
+        {/* ── Common locations helper ──────────────────────────────────────── */}
+        <button
+          type="button"
+          onClick={() => void toggleLocations()}
+          disabled={isScanning}
+          className="mt-0.5 flex items-center gap-1.5 self-start text-xs text-blue-400 transition-colors hover:text-blue-300 disabled:opacity-40"
+        >
+          <PinIcon className="h-3.5 w-3.5" />
+          {showLocations ? 'Hide common locations' : 'Where do extensions & global packages live?'}
+          <ChevronIcon className={`h-3 w-3 transition-transform ${showLocations ? 'rotate-180' : ''}`} />
+        </button>
+
+        {showLocations && (
+          <div className="animate-fade-in rounded-md border border-gray-700 bg-gray-900/40 p-1.5">
+            {locationsLoading ? (
+              <p className="flex items-center gap-2 px-1.5 py-1.5 text-xs text-gray-500">
+                <SpinnerIcon className="h-3.5 w-3.5 animate-spin" /> Looking for common locations…
+              </p>
+            ) : locations.length === 0 ? (
+              <p className="px-1.5 py-1.5 text-xs text-gray-500">
+                No common dependency folders found on this machine — type or browse to a path above.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-0.5">
+                {locations.map((loc) => (
+                  <li key={loc.path}>
+                    <button
+                      type="button"
+                      onClick={() => selectLocation(loc)}
+                      disabled={isScanning || discovering}
+                      title={loc.path}
+                      className="group flex w-full items-center gap-2.5 rounded px-2 py-1.5 text-left transition-colors hover:bg-gray-700/50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span className={`w-14 flex-shrink-0 text-xs font-semibold ${ECO_COLOR[loc.note] ?? 'text-gray-400'}`}>
+                        {loc.note}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium text-gray-200">{loc.label}</span>
+                        <span className="block truncate font-mono text-[11px] text-gray-500">
+                          {truncateMiddle(loc.path, 48)}
+                        </span>
+                      </span>
+                      <span className="flex-shrink-0 text-xs text-blue-400 opacity-0 transition-opacity group-hover:opacity-100">
+                        Discover →
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Discover button ──────────────────────────────────────────────────── */}
@@ -296,7 +393,7 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
             </button>
           </div>
 
-          <div className="flex max-h-52 flex-col gap-0.5 overflow-y-auto rounded-md border border-gray-700 bg-gray-800/50 p-1">
+          <div className="flex max-h-72 flex-col gap-1 overflow-y-auto rounded-md border border-gray-700 bg-gray-800/50 p-1.5">
             {repos.map((repo) => (
               <RepoItem
                 key={repo.path}
@@ -308,7 +405,7 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
           </div>
 
           {selected.size > 0 && (
-            <p className="text-xs text-gray-600">
+            <p className="text-xs text-gray-400">
               {selected.size} of {repos.length} selected · scan covers the root path above.
             </p>
           )}
@@ -361,8 +458,8 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
             {progress.queried > 0 && <StatChip label="CVEs" value={progress.queried} color="text-amber-500" />}
           </div>
           {progress.current && (
-            <p className="truncate text-xs text-gray-600" title={progress.current}>
-              {truncateMiddle(progress.current, 34)}
+            <p className="selectable truncate text-xs text-gray-400" title={progress.current}>
+              {truncateMiddle(progress.current, 44)}
             </p>
           )}
         </div>
@@ -431,26 +528,33 @@ function RepoItem({
   return (
     <label
       className={[
-        'flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 text-xs transition-colors',
-        checked ? 'bg-blue-950/30' : 'hover:bg-gray-700/40',
+        'flex cursor-pointer items-start gap-2.5 rounded px-2 py-2 text-sm transition-colors',
+        checked ? 'bg-blue-950/40' : 'hover:bg-gray-700/40',
       ].join(' ')}
     >
       <input
         type="checkbox"
         checked={checked}
         onChange={onToggle}
-        className="mt-0.5 flex-shrink-0 accent-blue-500"
+        className="mt-0.5 h-4 w-4 flex-shrink-0 accent-blue-500"
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className={`font-semibold ${ECO_COLOR[repo.ecosystem] ?? 'text-gray-400'}`}>
+          <span className={`flex-shrink-0 font-semibold ${ECO_COLOR[repo.ecosystem] ?? 'text-gray-300'}`}>
             {repo.ecosystem}
           </span>
-          <span className="text-gray-600">·</span>
-          <span className="text-gray-400">{repo.label}</span>
+          <span className="flex-shrink-0 text-gray-600">·</span>
+          {/* Project name = folder above node_modules (or the lockfile dir).
+              Hover reveals the full path. */}
+          <span className="truncate font-medium text-gray-200" title={repo.path}>
+            {projectName(repo.path)}
+          </span>
         </div>
-        <p className="mt-0.5 truncate font-mono text-gray-600" title={repo.path}>
-          {truncateMiddle(repo.path, 30)}
+        <p
+          className="selectable mt-0.5 truncate font-mono text-xs text-gray-500"
+          title={repo.path}
+        >
+          {truncateMiddle(repo.path, 52)}
         </p>
       </div>
     </label>
@@ -476,6 +580,17 @@ function truncateMiddle(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str;
   const half = Math.floor((maxLen - 1) / 2);
   return str.slice(0, half) + '…' + str.slice(str.length - half);
+}
+
+// Derive a human-readable project name from a repo path. For a path that ends
+// in `node_modules`, the project is the folder one level up; otherwise it's the
+// last path segment (the lockfile's own directory). Handles both POSIX and
+// Windows separators and any trailing slash.
+function projectName(p: string): string {
+  const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
+  const last = parts[parts.length - 1] ?? p;
+  if (last === 'node_modules' && parts.length >= 2) return parts[parts.length - 2];
+  return last || p;
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -514,6 +629,25 @@ function SpinnerIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
+function PinIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
     </svg>
   );
 }

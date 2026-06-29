@@ -88,6 +88,13 @@ export interface RepoHit {
   label: string;     // human-readable description
 }
 
+/** A well-known dependency location returned by CommonLocations. */
+export interface LocationHint {
+  label: string;
+  path: string;
+  note: string; // ecosystem hint, e.g. "npm" | "Go"
+}
+
 // ── Exported method bindings ─────────────────────────────────────────────────
 
 /**
@@ -148,4 +155,13 @@ export function SelectDirectory(): Promise<string> {
 export function DiscoverRepos(root: string): Promise<RepoHit[]> {
   // Wails unwraps ([]RepoHit, error) — rejects on Go error.
   return call<RepoHit[]>('DiscoverRepos', root);
+}
+
+/**
+ * CommonLocations returns well-known dependency directories (editor extensions,
+ * global npm/Go/Cargo stores) that exist on this machine, for use as one-click
+ * scan targets. Returns an empty list if none are present.
+ */
+export function CommonLocations(): Promise<LocationHint[]> {
+  return call<LocationHint[]>('CommonLocations');
 }

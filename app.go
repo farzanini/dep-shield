@@ -306,7 +306,99 @@ func (a *App) DiscoverRepos(root string) ([]RepoHit, error) {
 	}
 
 	walk(root, 0)
+
+	// Collapse npm duplicates: a project that has both a lockfile and its own
+	// node_modules produces two hits for the same project. The lockfile hit
+	// points at the project root (which already covers node_modules when
+	// scanned), so drop the redundant node_modules hit whenever a sibling
+	// lockfile hit exists. A node_modules with no lockfile is kept.
+	lockDirs := map[string]bool{}
+	for _, h := range hits {
+		if h.Ecosystem == "npm" && filepath.Base(h.Path) != "node_modules" {
+			lockDirs[h.Path] = true
+		}
+	}
+	filtered := hits[:0]
+	for _, h := range hits {
+		if h.Ecosystem == "npm" && filepath.Base(h.Path) == "node_modules" && lockDirs[filepath.Dir(h.Path)] {
+			continue
+		}
+		filtered = append(filtered, h)
+	}
+	hits = filtered
+
 	return hits, nil
+}
+
+// LocationHint is a well-known directory where third-party packages tend to
+// accumulate — editor extensions, global package installs, language caches —
+// that a user might not think to scan but where vulnerable code often hides.
+type LocationHint struct {
+	Label string `json:"label"`
+	Path  string `json:"path"`
+	Note  string `json:"note"` // ecosystem hint, e.g. "npm", "Go"
+}
+
+// CommonLocations returns dependency hot-spots that actually exist on the
+// current machine, so the UI can offer them as one-click scan targets. Only
+// existing directories are returned — the list never contains a dead path.
+func (a *App) CommonLocations() []LocationHint {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	j := filepath.Join
+
+	type cand struct{ label, path, note string }
+	cands := []cand{
+		{"VS Code extensions", j(home, ".vscode", "extensions"), "npm"},
+		{"VS Code Insiders extensions", j(home, ".vscode-insiders", "extensions"), "npm"},
+		{"VS Code Server extensions (remote/WSL)", j(home, ".vscode-server", "extensions"), "npm"},
+		{"Cursor extensions", j(home, ".cursor", "extensions"), "npm"},
+		{"Windsurf extensions", j(home, ".windsurf", "extensions"), "npm"},
+		{"VSCodium extensions", j(home, ".vscode-oss", "extensions"), "npm"},
+		{"npx package cache", j(home, ".npm", "_npx"), "npm"},
+		{"Cargo registry", j(home, ".cargo", "registry"), "crates.io"},
+		{"Python user packages", j(home, ".local", "lib"), "PyPI"},
+	}
+
+	// Go module cache: honour GOPATH if set, else the ~/go default.
+	goPath := os.Getenv("GOPATH")
+	if goPath == "" {
+		goPath = j(home, "go")
+	}
+	cands = append(cands, cand{"Go module cache", j(goPath, "pkg", "mod"), "Go"})
+
+	// Global npm installs: Homebrew (Apple Silicon / Intel), /usr/local, and
+	// the Windows per-user store under %APPDATA%.
+	cands = append(cands,
+		cand{"Global npm (Homebrew, Apple Silicon)", "/opt/homebrew/lib/node_modules", "npm"},
+		cand{"Global npm (/usr/local)", "/usr/local/lib/node_modules", "npm"},
+	)
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		cands = append(cands, cand{"Global npm (Windows)", j(appData, "npm", "node_modules"), "npm"})
+	}
+
+	// nvm keeps a separate global node_modules per installed Node version; offer
+	// the newest (versions sort lexically, newest last).
+	if matches, _ := filepath.Glob(j(home, ".nvm", "versions", "node", "*", "lib", "node_modules")); len(matches) > 0 {
+		latest := matches[len(matches)-1]
+		ver := filepath.Base(filepath.Dir(filepath.Dir(latest))) // …/node/<ver>/lib/node_modules
+		cands = append(cands, cand{"Global npm (nvm " + ver + ")", latest, "npm"})
+	}
+
+	out := make([]LocationHint, 0, len(cands))
+	seen := map[string]bool{}
+	for _, c := range cands {
+		if seen[c.path] {
+			continue
+		}
+		if info, err := os.Stat(c.path); err == nil && info.IsDir() {
+			seen[c.path] = true
+			out = append(out, LocationHint{Label: c.label, Path: c.path, Note: c.note})
+		}
+	}
+	return out
 }
 
 // ExportReport prompts the user for a save location and writes an HTML report.
