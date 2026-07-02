@@ -80,6 +80,8 @@ type ScoredVuln struct {
 	DaysSincePublished int      `json:"daysSincePublished"`
 	Source             string   `json:"source"`      // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
 	SourceLabel        string   `json:"sourceLabel"` // human-readable label
+	Path               string   `json:"path"`        // where the package was found (e.g. the node_modules dir)
+	RepoPath           string   `json:"repoPath"`    // directory the fix command should be run in (project root)
 }
 
 // FixSuggestion is returned by GetSuggestedFix.
@@ -153,6 +155,52 @@ func (a *App) StartScan(path string) {
 	a.scanCancel = cancel
 
 	go a.runScan(scanCtx, path)
+}
+
+// StartScanRepo clones a remote git repository and scans the checkout. url may
+// be an https:// URL (token used for private repos) or an SSH URL (git@… /
+// ssh://…, authenticated via the user's SSH keys). Progress is streamed via the
+// same "scan:progress" / "scan:complete" events as StartScan.
+func (a *App) StartScanRepo(url, token string) {
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
+
+	a.mu.Lock()
+	a.results = nil
+	a.rawPkgs = nil
+	a.mu.Unlock()
+
+	scanCtx, cancel := context.WithCancel(context.Background())
+	a.scanCancel = cancel
+
+	go a.runRepoScan(scanCtx, url, token)
+}
+
+// runRepoScan clones url into a temp directory, scans it, then removes it.
+func (a *App) runRepoScan(ctx context.Context, url, token string) {
+	a.emit("scan:progress", ScanProgress{
+		Phase:   "cloning",
+		Percent: 0,
+		Message: "Cloning repository…",
+		Current: url,
+	})
+
+	dir, cleanup, err := cloneRepo(ctx, url, token, a.log)
+	if err != nil {
+		a.emit("scan:progress", ScanProgress{
+			Phase:   "error",
+			Message: "Could not clone repository",
+			Error:   err.Error(),
+			Percent: 0,
+		})
+		a.emit("scan:complete", false)
+		a.log.Error("clone failed", zap.Error(err))
+		return
+	}
+	defer cleanup()
+
+	a.runScan(ctx, dir)
 }
 
 // GetResults returns the vulnerability findings from the most recent completed
@@ -538,6 +586,22 @@ func (a *App) runScan(ctx context.Context, path string) {
 		})
 	}
 
+	// Also detect projects by their committed manifests/lockfiles (go.mod,
+	// package-lock.json, Cargo.lock, requirements.txt, …). This catches
+	// checkouts — e.g. a freshly cloned repo — that have lockfiles but no
+	// installed node_modules/site-packages for the store-based walk to find.
+	hits = mergeHits(hits, manifestHits(path, 8))
+	if len(hits) != found {
+		found = len(hits)
+		progress(ScanProgress{
+			Phase:   "walking",
+			Found:   found,
+			Percent: 15,
+			Message: fmt.Sprintf("Found %d dependency location%s…", found, plural(found, "", "s")),
+			Current: path,
+		})
+	}
+
 	if len(hits) == 0 {
 		fail("No dependency directories found in "+path, nil)
 		return
@@ -705,23 +769,51 @@ func toScoredVuln(v models.Vulnerability) ScoredVuln {
 
 	src, srcLabel := deriveSource(v.AffectedPkg.Path)
 
-	return ScoredVuln{
-		ID:          v.ID,
-		CVE:         cveID,
-		Severity:    string(v.Severity),
-		CVSS:        v.CVSS,
-		NormScore:   v.CVSS, // scorer currently stores NormalisedScore back through Vulnerability
-		Package:     v.AffectedPkg.Name,
-		Version:     v.AffectedPkg.Version,
-		Ecosystem:   string(v.AffectedPkg.Ecosystem),
-		FixedIn:     v.FixedIn,
-		HasFix:      v.FixedIn != "",
-		FixAdvice:   buildAdvice(v),
-		Summary:     v.Summary,
-		References:  refs,
-		Source:      src,
-		SourceLabel: srcLabel,
+	// FixAdvice is populated by the scorer; fall back to deriving it locally
+	// for any vulnerability that never passed through Score() (e.g. tests).
+	advice := v.FixAdvice
+	if advice == "" {
+		advice = buildAdvice(v)
 	}
+
+	return ScoredVuln{
+		ID:                 v.ID,
+		CVE:                cveID,
+		Severity:           string(v.Severity),
+		CVSS:               v.CVSS,
+		NormScore:          v.NormScore,
+		Package:            v.AffectedPkg.Name,
+		Version:            v.AffectedPkg.Version,
+		Ecosystem:          string(v.AffectedPkg.Ecosystem),
+		FixedIn:            v.FixedIn,
+		HasFix:             v.FixedIn != "",
+		FixAdvice:          advice,
+		Summary:            v.Summary,
+		References:         refs,
+		DaysSincePublished: v.DaysSincePublished,
+		Source:             src,
+		SourceLabel:        srcLabel,
+		Path:               v.AffectedPkg.Path,
+		RepoPath:           fixDir(v.AffectedPkg.Path),
+	}
+}
+
+// fixDir returns the directory a fix command (e.g. `npm install …`) should be
+// run in. The npm scanner records the node_modules directory, so the project
+// root — where package.json lives — is its parent. For Go/Cargo/PyPI the
+// recorded path is already the manifest/project directory, so it's used as-is.
+func fixDir(pkgPath string) string {
+	if pkgPath == "" {
+		return ""
+	}
+	sep := string(filepath.Separator)
+	if i := strings.LastIndex(pkgPath, sep+"node_modules"); i >= 0 {
+		return pkgPath[:i]
+	}
+	if filepath.Base(pkgPath) == "node_modules" {
+		return filepath.Dir(pkgPath)
+	}
+	return pkgPath
 }
 
 func buildAdvice(v models.Vulnerability) string {

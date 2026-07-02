@@ -57,11 +57,15 @@ type Package struct {
 }
 
 // ToModel converts to the leaner models.Package used by the advisory layer.
+// The direct/transitive graph metadata is carried across so the scorer can
+// weight direct dependencies higher.
 func (p Package) ToModel() models.Package {
 	return models.Package{
 		Name:      p.Name,
 		Version:   coalesce(p.ResolvedVersion, p.Version),
 		Ecosystem: models.Ecosystem(p.Ecosystem),
+		Direct:    !p.IsTransitive,
+		Depth:     p.Depth,
 	}
 }
 
