@@ -590,7 +590,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	// package-lock.json, Cargo.lock, requirements.txt, …). This catches
 	// checkouts — e.g. a freshly cloned repo — that have lockfiles but no
 	// installed node_modules/site-packages for the store-based walk to find.
-	hits = mergeHits(hits, manifestHits(path, 8))
+	hits = mergeHits(hits, manifestHits(ctx, path, 8))
 	if len(hits) != found {
 		found = len(hits)
 		progress(ScanProgress{

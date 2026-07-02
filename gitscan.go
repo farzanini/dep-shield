@@ -45,6 +45,26 @@ func cloneRepo(ctx context.Context, rawURL, token string, log *zap.Logger) (dir 
 	}
 	cleanup = func() { _ = os.RemoveAll(tmp) }
 
+	// Fast path: a blobless, sparse checkout that fetches only dependency
+	// manifests. On a large repo this transfers a handful of small files plus
+	// tree metadata instead of every blob at HEAD.
+	if err := sparseCloneManifests(ctx, cloneURL, tmp, token); err == nil {
+		log.Info("cloned repository (sparse manifests)", zap.String("dir", tmp))
+		return tmp, cleanup, nil
+	} else {
+		// Partial clone isn't supported by every server or older git; fall back
+		// to a full shallow clone so scanning still works (just less cheaply).
+		log.Warn("sparse clone unavailable; falling back to full shallow clone",
+			zap.String("reason", err.Error()))
+		if rmErr := os.RemoveAll(tmp); rmErr != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("cannot reset temp directory: %w", rmErr)
+		}
+		if mkErr := os.MkdirAll(tmp, 0o755); mkErr != nil {
+			return "", func() {}, fmt.Errorf("cannot recreate temp directory: %w", mkErr)
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, "git", "clone",
 		"--depth", "1", "--single-branch", "--no-tags",
 		cloneURL, tmp)
@@ -64,6 +84,51 @@ func cloneRepo(ctx context.Context, rawURL, token string, log *zap.Logger) (dir 
 
 	log.Info("cloned repository", zap.String("dir", tmp))
 	return tmp, cleanup, nil
+}
+
+// sparseManifestFiles are the files the parsers actually read. It is a superset
+// of manifestFiles: a sparse checkout must also pull each manifest's companion
+// files (go.sum beside go.mod, package.json beside a lockfile) or the parser
+// would find the directory but no packages inside it.
+var sparseManifestFiles = []string{
+	"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "package.json",
+	"go.mod", "go.sum",
+	"Cargo.lock",
+	"Pipfile.lock", "poetry.lock", "requirements.txt",
+}
+
+// sparseCloneManifests performs a blobless, no-checkout clone and then checks
+// out only sparseManifestFiles. It returns an error (with the token redacted)
+// when any git step fails — the caller then falls back to a full clone.
+//
+// The three steps:
+//  1. clone --filter=blob:none --no-checkout  → fetch commit + tree objects only
+//  2. sparse-checkout set --no-cone <files>   → restrict the working tree
+//  3. checkout                                → fetch just the matching blobs
+func sparseCloneManifests(ctx context.Context, cloneURL, dir, token string) error {
+	run := func(args ...string) error {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			msg := strings.TrimSpace(redactToken(string(out), token))
+			if msg == "" {
+				msg = err.Error()
+			}
+			return fmt.Errorf("git %s: %s", args[0], msg)
+		}
+		return nil
+	}
+
+	if err := run("clone", "--depth", "1", "--single-branch", "--no-tags",
+		"--filter=blob:none", "--no-checkout", cloneURL, dir); err != nil {
+		return err
+	}
+	setArgs := append([]string{"-C", dir, "sparse-checkout", "set", "--no-cone"}, sparseManifestFiles...)
+	if err := run(setArgs...); err != nil {
+		return err
+	}
+	return run("-C", dir, "checkout")
 }
 
 // buildCloneURL validates the URL scheme and, for HTTPS, injects the token as
@@ -136,11 +201,15 @@ var manifestFiles = map[string]models.Ecosystem{
 //
 // This is what lets dep-shield scan a freshly cloned repo — or any local
 // checkout — that has lockfiles but no installed dependency stores.
-func manifestHits(root string, maxDepth int) []scanner.DirHit {
+func manifestHits(ctx context.Context, root string, maxDepth int) []scanner.DirHit {
 	var hits []scanner.DirHit
 	seen := map[string]bool{} // dedupe: one npm hit per project dir
 
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		// Abort the walk promptly if the scan was cancelled.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			return nil
 		}

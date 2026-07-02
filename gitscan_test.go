@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,7 +51,7 @@ func TestManifestHits(t *testing.T) {
 	// node_modules subtree should be pruned, not double-counted
 	mustWrite(t, filepath.Join(npmDir, "node_modules", "left-pad", "package.json"), `{"name":"left-pad"}`)
 
-	hits := manifestHits(root, 8)
+	hits := manifestHits(context.Background(), root, 8)
 
 	got := map[string]models.Ecosystem{}
 	for _, h := range hits {
