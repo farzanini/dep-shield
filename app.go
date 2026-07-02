@@ -326,8 +326,7 @@ func (a *App) DiscoverRepos(root string) ([]RepoHit, error) {
 			case "node_modules":
 				if !seen[full] {
 					seen[full] = true
-					src, lbl := deriveSource(full)
-					_ = src
+					_, lbl := deriveSource(full)
 					hits = append(hits, RepoHit{Path: full, Ecosystem: "npm", Label: lbl + " (node_modules)"})
 				}
 				// Don't recurse into node_modules — it can be enormous.
