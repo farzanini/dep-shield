@@ -14,6 +14,12 @@ const (
 	EcosystemGo    Ecosystem = "Go"
 	EcosystemCargo Ecosystem = "crates.io"
 	EcosystemPyPI  Ecosystem = "PyPI"
+
+	// EcosystemHomebrew marks packages collected from Homebrew. OSV has no
+	// Homebrew ecosystem, so the CVE layer routes these to the NVD/CPE source
+	// instead. Distro ecosystems (Debian:12, Ubuntu:22.04, Alpine:v3.19) are
+	// release-specific strings built at runtime, not constants.
+	EcosystemHomebrew Ecosystem = "Homebrew"
 )
 
 // Package is one discovered dependency — name, version, where it lives on disk.
