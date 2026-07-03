@@ -44,6 +44,7 @@ import (
 	"github.com/dep-shield/dep-shield/internal/reporter"
 	"github.com/dep-shield/dep-shield/internal/scanner"
 	"github.com/dep-shield/dep-shield/internal/scorer"
+	"github.com/dep-shield/dep-shield/internal/syspkg"
 )
 
 // ── Shared types (serialised to JSON for the frontend) ────────────────────────
@@ -201,6 +202,86 @@ func (a *App) runRepoScan(ctx context.Context, url, token string) {
 	defer cleanup()
 
 	a.runScan(ctx, dir)
+}
+
+// StartSystemScan scans the host's system package managers (dpkg/apt, apk,
+// Homebrew) for vulnerable OS packages. It returns immediately; progress
+// streams via the same "scan:progress" / "scan:complete" events as StartScan.
+func (a *App) StartSystemScan() {
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
+
+	a.mu.Lock()
+	a.results = nil
+	a.rawPkgs = nil
+	a.mu.Unlock()
+
+	scanCtx, cancel := context.WithCancel(context.Background())
+	a.scanCancel = cancel
+
+	go a.runSystemScan(scanCtx)
+}
+
+// runSystemScan enumerates installed packages from every available system
+// package manager, then runs them through the shared CVE → score pipeline.
+func (a *App) runSystemScan(ctx context.Context) {
+	progress := func(p ScanProgress) {
+		a.emit("scan:progress", p)
+		a.log.Info("system scan progress",
+			zap.String("phase", p.Phase), zap.String("message", p.Message))
+	}
+	fail := func(msg string, err error) {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		a.emit("scan:progress", ScanProgress{Phase: "error", Message: msg, Error: errStr})
+		a.emit("scan:complete", false)
+		a.log.Error(msg, zap.Error(err))
+	}
+
+	progress(ScanProgress{
+		Phase:   "collecting",
+		Percent: 0,
+		Message: "Enumerating system packages…",
+	})
+
+	collectors := syspkg.Detect(a.log)
+	if len(collectors) == 0 {
+		fail("No supported system package manager found on this host", nil)
+		return
+	}
+
+	var pkgs []models.Package
+	for _, c := range collectors {
+		if ctx.Err() != nil {
+			fail("Scan cancelled", ctx.Err())
+			return
+		}
+		got, err := c.Collect(ctx)
+		if err != nil {
+			a.log.Warn("system collector failed",
+				zap.String("manager", c.Name()), zap.Error(err))
+			continue
+		}
+		pkgs = append(pkgs, got...)
+		progress(ScanProgress{
+			Phase:   "collecting",
+			Found:   len(pkgs),
+			Percent: 15,
+			Message: fmt.Sprintf("Collected %d package%s (%s)…",
+				len(pkgs), plural(len(pkgs), "", "s"), c.Name()),
+			Current: c.Name(),
+		})
+	}
+
+	if len(pkgs) == 0 {
+		fail("No system packages found to scan", nil)
+		return
+	}
+
+	a.queryScoreEmit(ctx, pkgs, len(pkgs), progress, fail)
 }
 
 // GetResults returns the vulnerability findings from the most recent completed
@@ -633,13 +714,24 @@ func (a *App) runScan(ctx context.Context, path string) {
 	a.rawPkgs = pkgs
 	a.mu.Unlock()
 
+	// ── Phases 3–4: query CVE databases, score, emit completion ───────────────
+	a.queryScoreEmit(ctx, parser.ToModels(pkgs), found, progress, fail)
+}
+
+// queryScoreEmit runs the CVE query, scoring, result storage, and completion
+// events for an already-collected package set. It is the shared tail of both
+// runScan (filesystem) and runSystemScan (system package managers). found is
+// the location/manager count reported in earlier progress events.
+func (a *App) queryScoreEmit(ctx context.Context, modelPkgs []models.Package, found int, progress func(ScanProgress), fail func(string, error)) {
+	nPkgs := len(modelPkgs)
+
 	// ── Phase 3: Query CVE databases ──────────────────────────────────────────
 	progress(ScanProgress{
 		Phase:   "querying",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Percent: 50,
-		Message: fmt.Sprintf("Querying CVE databases for %d package%s…", len(pkgs), plural(len(pkgs), "", "s")),
+		Message: fmt.Sprintf("Querying CVE databases for %d package%s…", nPkgs, plural(nPkgs, "", "s")),
 	})
 
 	cveClient := cve.NewClient(cve.Options{
@@ -648,7 +740,6 @@ func (a *App) runScan(ctx context.Context, path string) {
 		Log:         a.log,
 	})
 
-	modelPkgs := parser.ToModels(pkgs)
 	vulns, err := cveClient.QueryAll(ctx, modelPkgs)
 	if err != nil && ctx.Err() != nil {
 		fail("Scan cancelled during CVE query", ctx.Err())
@@ -658,7 +749,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "querying",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: len(vulns),
 		Percent: 80,
 		Message: fmt.Sprintf("Found %d potential vulnerabilit%s", len(vulns), plural(len(vulns), "y", "ies")),
@@ -668,7 +759,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "scoring",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: len(vulns),
 		Percent: 90,
 		Message: "Scoring and sorting findings…",
@@ -689,12 +780,12 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "done",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: finalCount,
 		Percent: 100,
 		Message: fmt.Sprintf("Scan complete — %d vulnerabilit%s found across %d package%s",
 			finalCount, plural(finalCount, "y", "ies"),
-			len(pkgs), plural(len(pkgs), "", "s")),
+			nPkgs, plural(nPkgs, "", "s")),
 	})
 
 	a.emit("scan:complete", true)
