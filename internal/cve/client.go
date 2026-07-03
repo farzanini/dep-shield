@@ -98,6 +98,7 @@ func NewClient(opts Options) *Client {
 		sources: []Source{
 			newOSVSource(httpClient, log),
 			newGHSource(httpClient, log),
+			newNVDSource(httpClient, log),
 		},
 		workers: opts.Workers,
 		log:     log,
@@ -271,6 +272,12 @@ type osvRef struct {
 
 // Query implements Source for the OSV.dev REST API.
 func (o *osvSource) Query(ctx context.Context, pkg models.Package) ([]models.Vulnerability, error) {
+	// OSV has no Homebrew ecosystem; those packages are handled by the NVD
+	// source. Skipping here avoids an error response per Homebrew formula.
+	if pkg.Ecosystem == models.EcosystemHomebrew {
+		return nil, nil
+	}
+
 	body, err := json.Marshal(osvRequest{
 		Version: pkg.Version,
 		Package: osvPackage{

@@ -124,16 +124,26 @@ func severityToScore(s string) float64 {
 	}
 }
 
-// parseAdvisoryTime parses an advisory publish timestamp. Both OSV and the
-// GitHub Advisory API emit RFC3339 (e.g. "2021-12-10T00:00:35Z"). An empty or
+// advisoryTimeLayouts are the timestamp formats the advisory sources emit. OSV
+// and GitHub use RFC3339 ("2021-12-10T00:00:35Z"); NVD omits the zone and keeps
+// milliseconds ("2022-01-14T21:15:00.000"), treated as UTC.
+var advisoryTimeLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05.000",
+	"2006-01-02T15:04:05",
+}
+
+// parseAdvisoryTime parses an advisory publish timestamp. An empty or
 // unparseable value yields the zero time, which the scorer treats as "unknown
 // age" (no age bonus applied).
 func parseAdvisoryTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t
+	for _, layout := range advisoryTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
 	}
 	return time.Time{}
 }
