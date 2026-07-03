@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { StartScan, SelectDirectory, DiscoverRepos, CommonLocations, isBridgeAvailable, isMethodAvailable } from '../wailsjs/go/main/App';
+import { StartScan, StartScanRepo, StartSystemScan, SelectDirectory, DiscoverRepos, CommonLocations, isBridgeAvailable, isMethodAvailable } from '../wailsjs/go/main/App';
 import type { ScanProgress, RepoHit, LocationHint } from '../wailsjs/go/main/App';
 
 interface Props {
@@ -29,6 +29,9 @@ function detectBridge(): Exclude<BridgeStatus, 'checking'> {
 export default function ScanPanel({ phase, progress, onScanStart }: Props) {
   // Start as 'checking' so we never flash the error banner on first render.
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>('checking');
+  const [mode, setMode] = useState<'folder' | 'git' | 'system'>('folder');
+  const [repoUrl, setRepoUrl] = useState('');
+  const [repoToken, setRepoToken] = useState('');
   const [path, setPath] = useState('');
   const [validationError, setValidationError] = useState('');
   const [discovering, setDiscovering] = useState(false);
@@ -207,6 +210,27 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
     await StartScan(trimmed);
   };
 
+  const handleScanRepo = async () => {
+    const u = repoUrl.trim();
+    if (!u) {
+      setValidationError('Enter a repository URL to scan.');
+      return;
+    }
+    if (!/^(https?:\/\/|ssh:\/\/|git@)/.test(u)) {
+      setValidationError('URL must start with https://, ssh://, or git@.');
+      return;
+    }
+    setValidationError('');
+    onScanStart();
+    await StartScanRepo(u, repoToken.trim());
+  };
+
+  const handleScanSystem = async () => {
+    setValidationError('');
+    onScanStart();
+    await StartSystemScan();
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !isScanning) void handleScan();
   };
@@ -215,6 +239,8 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
 
   const pct = progress?.percent ?? 0;
   const phaseLabels: Record<string, string> = {
+    cloning:    'Cloning repository…',
+    collecting: 'Enumerating system packages…',
     walking:  'Walking filesystem…',
     parsing:  'Parsing lockfiles…',
     querying: 'Querying CVE databases…',
@@ -222,6 +248,11 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
     done:     'Complete',
     error:    'Error',
   };
+
+  // Only offer the system-packages tab when the backend exposes StartSystemScan.
+  const modes = (isMethodAvailable('StartSystemScan')
+    ? ['folder', 'git', 'system']
+    : ['folder', 'git']) as Array<'folder' | 'git' | 'system'>;
 
   return (
     <div className="flex flex-col gap-5">
@@ -236,6 +267,87 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
         <BridgeBanner status={bridgeStatus} onRetry={recheckBridge} />
       )}
 
+      {/* ── Source mode toggle ───────────────────────────────────────────────── */}
+      <div className="flex gap-1 rounded-md border border-gray-700 bg-gray-900 p-1">
+        {modes.map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => { setMode(m); setValidationError(''); }}
+            disabled={isScanning}
+            className={[
+              'flex flex-1 items-center justify-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50',
+              mode === m ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-200',
+            ].join(' ')}
+          >
+            {m === 'folder' ? <FolderIcon className="h-3.5 w-3.5" />
+              : m === 'git' ? <GitIcon className="h-3.5 w-3.5" />
+              : <ChipIcon className="h-3.5 w-3.5" />}
+            {m === 'folder' ? 'Local folder' : m === 'git' ? 'Git repository' : 'System packages'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Git repository inputs ────────────────────────────────────────────── */}
+      {mode === 'git' && (
+        <div className="flex flex-col gap-3 animate-fade-in">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-gray-400" htmlFor="repo-url">Repository URL</label>
+            <input
+              id="repo-url"
+              type="text"
+              value={repoUrl}
+              onChange={(e) => { setRepoUrl(e.target.value); setValidationError(''); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isScanning) void handleScanRepo(); }}
+              placeholder="https://github.com/owner/repo"
+              disabled={isScanning}
+              spellCheck={false}
+              className={[
+                'selectable min-w-0 rounded-md border bg-gray-900 px-3 py-2',
+                'text-sm text-gray-200 placeholder:text-gray-600',
+                'focus:outline-none focus:ring-1',
+                validationError ? 'border-red-600 focus:ring-red-600' : 'border-gray-700 focus:ring-blue-500',
+                isScanning ? 'cursor-not-allowed opacity-50' : '',
+              ].join(' ')}
+            />
+            <p className="text-xs text-gray-400">
+              Public repos need no token. HTTPS or SSH (<span className="font-mono text-gray-300">git@…</span>) both work.
+              We shallow-clone to a temp folder and delete it after scanning.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs text-gray-400" htmlFor="repo-token">
+              Access token <span className="text-gray-600">— private repos only</span>
+            </label>
+            <input
+              id="repo-token"
+              type="password"
+              value={repoToken}
+              onChange={(e) => setRepoToken(e.target.value)}
+              placeholder="ghp_… (optional)"
+              disabled={isScanning}
+              spellCheck={false}
+              autoComplete="off"
+              className={[
+                'selectable min-w-0 rounded-md border border-gray-700 bg-gray-900 px-3 py-2',
+                'text-sm text-gray-200 placeholder:text-gray-600',
+                'focus:outline-none focus:ring-1 focus:ring-blue-500',
+                isScanning ? 'cursor-not-allowed opacity-50' : '',
+              ].join(' ')}
+            />
+            <p className="text-xs text-gray-500">
+              Used only to clone; never stored or logged. Ignored for SSH URLs.
+            </p>
+          </div>
+
+          {validationError && <p className="text-xs text-red-400">{validationError}</p>}
+        </div>
+      )}
+
+      {/* ── Local folder inputs ──────────────────────────────────────────────── */}
+      {mode === 'folder' && (
+      <>
       {/* ── Path input + Browse ──────────────────────────────────────────────── */}
       <div className="flex flex-col gap-1.5">
         <label className="text-xs text-gray-400" htmlFor="scan-path">
@@ -411,10 +523,28 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
           )}
         </div>
       )}
+      </>
+      )}
+
+      {/* ── System packages info ─────────────────────────────────────────────── */}
+      {mode === 'system' && (
+        <div className="flex flex-col gap-2 animate-fade-in text-xs text-gray-400">
+          <p>
+            Scans packages installed by this machine's package managers
+            (Homebrew on macOS; dpkg/apt and apk on Linux) against OSV and NVD.
+          </p>
+          <p className="text-gray-500">
+            Homebrew formulae are matched via NVD by CPE — set the{' '}
+            <code className="rounded bg-gray-900 px-1 py-0.5 text-gray-300">NVD_API_KEY</code>{' '}
+            environment variable for substantially faster lookups.
+          </p>
+          {validationError && <p className="text-red-400">{validationError}</p>}
+        </div>
+      )}
 
       {/* ── Scan button ──────────────────────────────────────────────────────── */}
       <button
-        onClick={() => void handleScan()}
+        onClick={() => void (mode === 'git' ? handleScanRepo() : mode === 'system' ? handleScanSystem() : handleScan())}
         disabled={isScanning}
         className={[
           'flex items-center justify-center gap-2 rounded-md px-4 py-2.5',
@@ -432,7 +562,9 @@ export default function ScanPanel({ phase, progress, onScanStart }: Props) {
         ) : (
           <>
             <ScanIcon className="h-4 w-4" />
-            {phase === 'done' || phase === 'error' ? 'Scan again' : 'Start scan'}
+            {phase === 'done' || phase === 'error'
+              ? 'Scan again'
+              : mode === 'git' ? 'Clone & scan' : mode === 'system' ? 'Scan system packages' : 'Start scan'}
           </>
         )}
       </button>
@@ -595,6 +727,16 @@ function projectName(p: string): string {
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
+function ChipIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" strokeLinejoin="round" />
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M9 3v3m3-3v3m3-3v3M9 18v3m3-3v3m3-3v3M3 9h3m-3 3h3m-3 3h3m12-6h3m-3 3h3m-3 3h3" />
+    </svg>
+  );
+}
+
 function FolderIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -629,6 +771,17 @@ function SpinnerIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
+function GitIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="6" cy="18" r="2.5" />
+      <circle cx="18" cy="9" r="2.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 8.5v7M18 11.5c0 3-2.5 4-6 4" />
     </svg>
   );
 }

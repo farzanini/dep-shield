@@ -13,7 +13,7 @@
 
 /** Emitted on the "scan:progress" event during StartScan. */
 export interface ScanProgress {
-  phase: 'walking' | 'parsing' | 'querying' | 'scoring' | 'done' | 'error';
+  phase: 'cloning' | 'collecting' | 'walking' | 'parsing' | 'querying' | 'scoring' | 'done' | 'error';
   found: number;
   parsed: number;
   queried: number;
@@ -41,6 +41,8 @@ export interface ScoredVuln {
   daysSincePublished: number;
   source: string;            // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
   sourceLabel: string;       // human-readable label
+  path: string;              // where the package was found (e.g. the node_modules dir)
+  repoPath: string;          // directory the fix command should be run in (project root)
 }
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
@@ -104,6 +106,25 @@ export interface LocationHint {
  */
 export function StartScan(path: string): Promise<void> {
   return call<void>('StartScan', path);
+}
+
+/**
+ * StartScanRepo clones a remote git repository and scans the checkout.
+ * `url` may be https:// (token used for private repos) or an SSH URL
+ * (git@… / ssh://…, authenticated via the user's SSH keys — token ignored).
+ * Progress arrives via the same "scan:progress"/"scan:complete" events.
+ */
+export function StartScanRepo(url: string, token: string): Promise<void> {
+  return call<void>('StartScanRepo', url, token);
+}
+
+/**
+ * StartSystemScan scans the host's system package managers (dpkg/apt, apk,
+ * Homebrew) for vulnerable OS packages. Returns immediately; progress arrives
+ * via the same "scan:progress"/"scan:complete" events as StartScan.
+ */
+export function StartSystemScan(): Promise<void> {
+  return call<void>('StartSystemScan');
 }
 
 /**
