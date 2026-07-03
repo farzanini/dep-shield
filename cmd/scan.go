@@ -21,13 +21,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/cve"
 	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/parser"
+	"github.com/dep-shield/dep-shield/internal/pipeline"
 	"github.com/dep-shield/dep-shield/internal/reporter"
-	"github.com/dep-shield/dep-shield/internal/scanner"
-	"github.com/dep-shield/dep-shield/internal/scorer"
-	"github.com/dep-shield/dep-shield/internal/syspkg"
 )
 
 // scanFlags holds all flags specific to the scan sub-command.
@@ -162,70 +158,24 @@ func runScan(ctx context.Context, sf scanFlags) error {
 	}
 	log.Info("starting scan", zap.Strings("paths", paths), zap.Bool("system", sf.System))
 
-	// ── 2–3. Walk filesystem and parse manifests ──────────────────────────────
-	var pkgs []parser.Package
-	if scanFS {
-		w := scanner.New(scanner.Options{
-			Roots:      paths,
-			Ecosystems: sf.Ecosystems,
-			Log:        log,
-		})
-		dirs, err := w.Walk(ctx)
-		if err != nil {
-			return fmt.Errorf("filesystem walk: %w", err)
-		}
-		log.Info("walk complete", zap.Int("directories", len(dirs)))
-
-		p := parser.New(log)
-		pkgs, err = p.ParseAll(ctx, dirs)
-		if err != nil {
-			return fmt.Errorf("parsing packages: %w", err)
-		}
-		log.Info("parsing complete", zap.Int("packages", len(pkgs)))
+	// ── 2. Run the scan pipeline ──────────────────────────────────────────────
+	result, err := pipeline.Run(ctx, pipeline.Options{
+		Roots:       paths,
+		Ecosystems:  sf.Ecosystems,
+		System:      sf.System,
+		MinSeverity: models.Severity(sf.MinSeverity),
+		Offline:     sf.OfflineMode,
+		Workers:     sf.Workers,
+		Log:         log,
+	})
+	if err != nil {
+		return err
 	}
-
-	// ── 4. Collect system packages (optional) and merge ───────────────────────
-	modelPkgs := parser.ToModels(pkgs)
-	if sf.System {
-		for _, c := range syspkg.Detect(log) {
-			got, err := c.Collect(ctx)
-			if err != nil {
-				log.Warn("system collector failed",
-					zap.String("manager", c.Name()), zap.Error(err))
-				continue
-			}
-			log.Info("system packages collected",
-				zap.String("manager", c.Name()), zap.Int("packages", len(got)))
-			modelPkgs = append(modelPkgs, got...)
-		}
-	}
-
-	if len(modelPkgs) == 0 {
+	if result.TotalPackages == 0 {
 		return fmt.Errorf("no packages found to scan")
 	}
 
-	// ── 5. Query CVE databases ────────────────────────────────────────────────
-	cveClient := cve.NewClient(cve.Options{
-		Offline: sf.OfflineMode,
-		Workers: sf.Workers,
-		Log:     log,
-	})
-	vulns, err := cveClient.QueryAll(ctx, modelPkgs)
-	if err != nil {
-		return fmt.Errorf("CVE query: %w", err)
-	}
-	log.Info("CVE query complete", zap.Int("vulnerabilities", len(vulns)))
-
-	// ── 6. Score and filter ───────────────────────────────────────────────────
-	sc := scorer.New(log)
-	result, err := sc.Score(vulns, models.Severity(sf.MinSeverity))
-	if err != nil {
-		return fmt.Errorf("scoring: %w", err)
-	}
-	result.ScannedPaths = paths
-	result.TotalPackages = len(modelPkgs)
-
-	// ── 7. Render output ──────────────────────────────────────────────────────
+	// ── 3. Render output ──────────────────────────────────────────────────────
 	rep := reporter.New(reporter.Options{
 		NoColour: flags.NoColour,
 		Format:   flags.Output,
