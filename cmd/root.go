@@ -107,6 +107,7 @@ func init() {
 	rootCmd.AddCommand(scanCmd())
 	rootCmd.AddCommand(reportCmd())
 	rootCmd.AddCommand(newVersionCmd())
+	rootCmd.AddCommand(mcpCmd())
 }
 
 // ── Version sub-command ───────────────────────────────────────────────────────
