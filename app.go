@@ -308,11 +308,12 @@ func (a *App) OpenInBrowser(url string) {
 	wailsrt.BrowserOpenURL(a.ctx, url)
 }
 
-// OpenTerminal opens the system terminal application with its working directory
-// set to dir, so the user can run a fix command there without cd-ing manually.
-// When dir is empty (e.g. a system package whose fix is machine-wide) it falls
-// back to the home directory. Returns an error the frontend can surface.
-func (a *App) OpenTerminal(dir string) error {
+// OpenTerminal opens the system terminal with its working directory set to dir
+// and, where the platform allows, the given command pre-filled at the prompt
+// (typed but NOT executed, so the user reviews it and presses Enter). When dir
+// is empty (e.g. a system package whose fix is machine-wide) it falls back to
+// the home directory. Returns an error the frontend can surface.
+func (a *App) OpenTerminal(dir, command string) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -323,7 +324,7 @@ func (a *App) OpenTerminal(dir string) error {
 		return fmt.Errorf("not a directory: %s", dir)
 	}
 
-	cmd, err := terminalCommand(dir)
+	cmd, err := terminalCommand(dir, strings.TrimSpace(command))
 	if err != nil {
 		return err
 	}
@@ -331,15 +332,27 @@ func (a *App) OpenTerminal(dir string) error {
 		a.log.Error("open terminal failed", zap.String("dir", dir), zap.Error(err))
 		return fmt.Errorf("could not open a terminal: %w", err)
 	}
-	a.log.Info("opened terminal", zap.String("dir", dir))
+	a.log.Info("opened terminal", zap.String("dir", dir), zap.Bool("prefilled", command != ""))
 	return nil
 }
 
 // terminalCommand builds the platform-specific command that launches a terminal
-// emulator with its working directory set to dir.
-func terminalCommand(dir string) (*exec.Cmd, error) {
+// with its working directory set to dir and, when command is non-empty and the
+// shell supports it, that command pre-filled at the prompt without running.
+func terminalCommand(dir, command string) (*exec.Cmd, error) {
 	switch runtime.GOOS {
 	case "darwin":
+		// zsh (the macOS default) can push text onto the next prompt's edit
+		// buffer with `print -z`, pre-filling the command without executing it.
+		// For other shells we just open at the directory.
+		if command != "" && strings.Contains(os.Getenv("SHELL"), "zsh") {
+			inner := fmt.Sprintf("cd %s && print -z -- %s", shellQuote(dir), shellQuote(command))
+			// `activate` must be a separate statement from `do script`; combining
+			// them in one tell block makes Terminal's AppleEvent reply time out.
+			return exec.Command("osascript",
+				"-e", "tell application \"Terminal\" to do script "+appleScriptQuote(inner),
+				"-e", `tell application "Terminal" to activate`), nil
+		}
 		return exec.Command("open", "-a", "Terminal", dir), nil
 	case "windows":
 		if _, err := exec.LookPath("wt.exe"); err == nil {
@@ -364,6 +377,20 @@ func terminalCommand(dir string) (*exec.Cmd, error) {
 		}
 		return nil, fmt.Errorf("no supported terminal emulator found on PATH")
 	}
+}
+
+// shellQuote wraps s in single quotes for safe use in a POSIX shell command,
+// escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// appleScriptQuote wraps s as an AppleScript string literal, escaping
+// backslashes and double quotes.
+func appleScriptQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 // SelectDirectory shows a native OS folder-picker dialog and returns the

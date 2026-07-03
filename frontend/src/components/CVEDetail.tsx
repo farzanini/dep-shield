@@ -213,10 +213,11 @@ function OpenTerminalButton({ dir, command }: { dir: string; command: string }) 
   const handleOpen = async () => {
     setStatus('idle');
     setErrMsg('');
-    // Best-effort clipboard copy so the command is ready to paste.
+    // Clipboard copy is the universal fallback: the command is pre-filled at the
+    // prompt on macOS/zsh, and pasteable everywhere else.
     await navigator.clipboard.writeText(command).catch(() => undefined);
     try {
-      await OpenTerminal(dir);
+      await OpenTerminal(dir, command);
       setStatus('ok');
       setTimeout(() => setStatus('idle'), 4000);
     } catch (e) {
@@ -235,7 +236,7 @@ function OpenTerminalButton({ dir, command }: { dir: string; command: string }) 
         {dir ? 'Open terminal here' : 'Open terminal'}
       </button>
       {status === 'ok' && (
-        <p className="text-xs text-green-400">Terminal opened — command copied, paste to run.</p>
+        <p className="text-xs text-green-400">Terminal opened — command ready, press Enter to run.</p>
       )}
       {status === 'error' && (
         <p className="text-xs text-red-400">Couldn’t open a terminal: {errMsg}</p>

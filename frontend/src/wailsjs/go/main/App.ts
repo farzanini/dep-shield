@@ -143,12 +143,13 @@ export function OpenInBrowser(url: string): Promise<void> {
 }
 
 /**
- * OpenTerminal opens the system terminal with its working directory set to dir
- * (or the home directory when dir is empty), so a fix command can be run there.
- * Rejects with an error when no terminal could be launched.
+ * OpenTerminal opens the system terminal at dir (or the home directory when dir
+ * is empty) and pre-fills `command` at the prompt where the shell supports it
+ * (macOS/zsh), typed but not executed. Rejects when no terminal could be
+ * launched.
  */
-export function OpenTerminal(dir: string): Promise<void> {
-  return call<void>('OpenTerminal', dir);
+export function OpenTerminal(dir: string, command: string): Promise<void> {
+  return call<void>('OpenTerminal', dir, command);
 }
 
 /**
