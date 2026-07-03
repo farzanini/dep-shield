@@ -108,6 +108,20 @@ dep-shield auto-detects which ecosystems are present by looking for lockfiles:
 | PyPI | `Pipfile.lock`, `poetry.lock`, `requirements.txt` |
 | Cargo | `Cargo.lock` |
 
+### Scan system packages
+
+Beyond project dependencies, dep-shield can scan packages installed by your OS package manager:
+
+```bash
+# Scan Homebrew (macOS) / dpkg/apt / apk (Linux):
+dep-shield scan --system
+
+# Combine with a project scan:
+dep-shield scan /path/to/project --system
+```
+
+Linux distro packages are matched against OSV; Homebrew formulae are matched against NVD by CPE (set `NVD_API_KEY` for faster lookups).
+
 ### Generate a report
 
 ```bash
@@ -124,6 +138,69 @@ dep-shield report --format table
 --timeout duration   abort scan after this duration (default 2m)
 --offline            skip all network requests (no CVE data)
 --log-level string   debug, info, warn, error (default "info")
+```
+
+---
+
+## MCP server — scan from AI agents
+
+dep-shield ships a [Model Context Protocol](https://modelcontextprotocol.io) server, so AI agents (Claude, and any MCP-compatible client) can scan projects and hosts for vulnerable packages as part of their work — e.g. auditing a repo they're editing and proposing the fixes.
+
+Start it over stdio:
+
+```bash
+dep-shield mcp
+```
+
+### Configure a client
+
+Most clients (Claude Desktop, etc.) use this config shape:
+
+```json
+{
+  "mcpServers": {
+    "dep-shield": {
+      "command": "dep-shield",
+      "args": ["mcp"],
+      "env": { "GITHUB_TOKEN": "ghp_…", "NVD_API_KEY": "…" }
+    }
+  }
+}
+```
+
+Use an absolute path to the binary if `dep-shield` isn't on the client's `PATH`. Both env vars are optional — `GITHUB_TOKEN` enriches results from the GitHub Advisory DB, `NVD_API_KEY` speeds up Homebrew lookups.
+
+For **Claude Code**:
+
+```bash
+claude mcp add dep-shield -- dep-shield mcp
+```
+
+### Tools
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `scan_project` | `path` (required), `min_severity`, `ecosystems` | Scan a local project directory for vulnerable dependencies (npm, Go, Cargo, PyPI). |
+| `scan_system_packages` | `min_severity` | Scan installed OS packages (Homebrew, dpkg/apt, apk). |
+
+Both return a JSON object:
+
+```json
+{
+  "scannedPaths": ["/path/to/project"],
+  "totalPackages": 241,
+  "vulnerabilityCount": 3,
+  "severityCounts": { "CRITICAL": 1, "HIGH": 2 },
+  "findings": [
+    {
+      "id": "CVE-2019-10744", "cve": "CVE-2019-10744",
+      "package": "lodash", "version": "4.17.11", "ecosystem": "npm",
+      "severity": "CRITICAL", "cvss": 9.1,
+      "fixedIn": "4.17.12", "fixAdvice": "Upgrade lodash from 4.17.11 to 4.17.12",
+      "summary": "Prototype pollution in lodash…"
+    }
+  ]
+}
 ```
 
 ---
@@ -176,6 +253,7 @@ dep-shield queries two vulnerability databases and merges the results:
 |---|---|---|
 | [OSV.dev](https://osv.dev) | npm, Go, PyPI, Cargo, and 20+ more | None required |
 | [GitHub Advisory Database](https://github.com/advisories) | npm, Go, PyPI, Cargo, Ruby, Java | `GITHUB_TOKEN` env var (optional; enriches data) |
+| [NVD](https://nvd.nist.gov) | Homebrew formulae (CPE matching) | `NVD_API_KEY` env var (optional; raises the rate limit) |
 
 Deduplication: when the same CVE appears in both sources, dep-shield keeps the entry with the higher CVSS score so the risk picture is never understated.
 
