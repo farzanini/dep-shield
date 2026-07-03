@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { PackageRow } from './ResultsTable';
 import type { ScoredVuln } from '../wailsjs/go/main/App';
-import { OpenInBrowser } from '../wailsjs/go/main/App';
+import { OpenInBrowser, OpenTerminal, isMethodAvailable } from '../wailsjs/go/main/App';
 import EcosystemBadge from './EcosystemBadge';
 
 interface Props {
@@ -99,6 +99,9 @@ export default function CVEDetail({ pkg, onClose }: Props) {
                   <CopyableCommand command={pkg.repoPath} />
                 </>
               )}
+              {isMethodAvailable('OpenTerminal') && (
+                <OpenTerminalButton dir={pkg.repoPath} command={pkg.fixCommand} />
+              )}
             </div>
           )}
         </div>
@@ -194,6 +197,48 @@ function VulnEntry({ vuln: v }: { vuln: ScoredVuln }) {
           <ExternalLinkIcon className="h-3 w-3" />
           View on NVD
         </button>
+      )}
+    </div>
+  );
+}
+
+// ── OpenTerminalButton ────────────────────────────────────────────────────────
+
+// OpenTerminalButton opens a terminal at dir and copies the fix command to the
+// clipboard, so the user only has to paste and run — no manual cd or retyping.
+function OpenTerminalButton({ dir, command }: { dir: string; command: string }) {
+  const [status, setStatus] = useState<'idle' | 'ok' | 'error'>('idle');
+  const [errMsg, setErrMsg] = useState('');
+
+  const handleOpen = async () => {
+    setStatus('idle');
+    setErrMsg('');
+    // Best-effort clipboard copy so the command is ready to paste.
+    await navigator.clipboard.writeText(command).catch(() => undefined);
+    try {
+      await OpenTerminal(dir);
+      setStatus('ok');
+      setTimeout(() => setStatus('idle'), 4000);
+    } catch (e) {
+      setStatus('error');
+      setErrMsg(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1">
+      <button
+        onClick={() => void handleOpen()}
+        className="flex items-center justify-center gap-1.5 rounded-md bg-gray-700 px-3 py-1.5 text-xs font-medium text-gray-200 transition-colors hover:bg-gray-600 focus:outline-none focus:ring-1 focus:ring-gray-500"
+      >
+        <TerminalIcon className="h-3.5 w-3.5" />
+        {dir ? 'Open terminal here' : 'Open terminal'}
+      </button>
+      {status === 'ok' && (
+        <p className="text-xs text-green-400">Terminal opened — command copied, paste to run.</p>
+      )}
+      {status === 'error' && (
+        <p className="text-xs text-red-400">Couldn’t open a terminal: {errMsg}</p>
       )}
     </div>
   );

@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -305,6 +306,64 @@ func (a *App) GetResults() []ScoredVuln {
 // Used by the frontend to let users navigate to CVE references.
 func (a *App) OpenInBrowser(url string) {
 	wailsrt.BrowserOpenURL(a.ctx, url)
+}
+
+// OpenTerminal opens the system terminal application with its working directory
+// set to dir, so the user can run a fix command there without cd-ing manually.
+// When dir is empty (e.g. a system package whose fix is machine-wide) it falls
+// back to the home directory. Returns an error the frontend can surface.
+func (a *App) OpenTerminal(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = home
+		}
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", dir)
+	}
+
+	cmd, err := terminalCommand(dir)
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		a.log.Error("open terminal failed", zap.String("dir", dir), zap.Error(err))
+		return fmt.Errorf("could not open a terminal: %w", err)
+	}
+	a.log.Info("opened terminal", zap.String("dir", dir))
+	return nil
+}
+
+// terminalCommand builds the platform-specific command that launches a terminal
+// emulator with its working directory set to dir.
+func terminalCommand(dir string) (*exec.Cmd, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", "-a", "Terminal", dir), nil
+	case "windows":
+		if _, err := exec.LookPath("wt.exe"); err == nil {
+			return exec.Command("wt.exe", "-d", dir), nil
+		}
+		return exec.Command("cmd", "/c", "start", "cmd", "/k", "cd /d "+dir), nil
+	default: // linux and other unixes: try common emulators in order
+		candidates := []struct {
+			bin  string
+			args []string
+		}{
+			{"x-terminal-emulator", []string{"--working-directory=" + dir}},
+			{"gnome-terminal", []string{"--working-directory=" + dir}},
+			{"konsole", []string{"--workdir", dir}},
+			{"xfce4-terminal", []string{"--working-directory=" + dir}},
+			{"xterm", []string{"-e", "cd '" + dir + "' && exec ${SHELL:-sh}"}},
+		}
+		for _, c := range candidates {
+			if _, err := exec.LookPath(c.bin); err == nil {
+				return exec.Command(c.bin, c.args...), nil
+			}
+		}
+		return nil, fmt.Errorf("no supported terminal emulator found on PATH")
+	}
 }
 
 // SelectDirectory shows a native OS folder-picker dialog and returns the

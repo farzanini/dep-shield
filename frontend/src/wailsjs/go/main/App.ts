@@ -143,6 +143,15 @@ export function OpenInBrowser(url: string): Promise<void> {
 }
 
 /**
+ * OpenTerminal opens the system terminal with its working directory set to dir
+ * (or the home directory when dir is empty), so a fix command can be run there.
+ * Rejects with an error when no terminal could be launched.
+ */
+export function OpenTerminal(dir: string): Promise<void> {
+  return call<void>('OpenTerminal', dir);
+}
+
+/**
  * GetSuggestedFix returns upgrade advice for a specific package+version pair.
  */
 export function GetSuggestedFix(
