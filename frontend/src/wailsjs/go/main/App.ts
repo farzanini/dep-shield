@@ -13,7 +13,7 @@
 
 /** Emitted on the "scan:progress" event during StartScan. */
 export interface ScanProgress {
-  phase: 'walking' | 'parsing' | 'querying' | 'scoring' | 'done' | 'error';
+  phase: 'cloning' | 'collecting' | 'walking' | 'parsing' | 'querying' | 'scoring' | 'done' | 'error';
   found: number;
   parsed: number;
   queried: number;
@@ -41,6 +41,8 @@ export interface ScoredVuln {
   daysSincePublished: number;
   source: string;            // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
   sourceLabel: string;       // human-readable label
+  path: string;              // where the package was found (e.g. the node_modules dir)
+  repoPath: string;          // directory the fix command should be run in (project root)
 }
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
@@ -88,6 +90,13 @@ export interface RepoHit {
   label: string;     // human-readable description
 }
 
+/** A well-known dependency location returned by CommonLocations. */
+export interface LocationHint {
+  label: string;
+  path: string;
+  note: string; // ecosystem hint, e.g. "npm" | "Go"
+}
+
 // ── Exported method bindings ─────────────────────────────────────────────────
 
 /**
@@ -97,6 +106,25 @@ export interface RepoHit {
  */
 export function StartScan(path: string): Promise<void> {
   return call<void>('StartScan', path);
+}
+
+/**
+ * StartScanRepo clones a remote git repository and scans the checkout.
+ * `url` may be https:// (token used for private repos) or an SSH URL
+ * (git@… / ssh://…, authenticated via the user's SSH keys — token ignored).
+ * Progress arrives via the same "scan:progress"/"scan:complete" events.
+ */
+export function StartScanRepo(url: string, token: string): Promise<void> {
+  return call<void>('StartScanRepo', url, token);
+}
+
+/**
+ * StartSystemScan scans the host's system package managers (dpkg/apt, apk,
+ * Homebrew) for vulnerable OS packages. Returns immediately; progress arrives
+ * via the same "scan:progress"/"scan:complete" events as StartScan.
+ */
+export function StartSystemScan(): Promise<void> {
+  return call<void>('StartSystemScan');
 }
 
 /**
@@ -112,6 +140,16 @@ export function GetResults(): Promise<ScoredVuln[] | null> {
  */
 export function OpenInBrowser(url: string): Promise<void> {
   return call<void>('OpenInBrowser', url);
+}
+
+/**
+ * OpenTerminal opens the system terminal at dir (or the home directory when dir
+ * is empty) and pre-fills `command` at the prompt where the shell supports it
+ * (macOS/zsh), typed but not executed. Rejects when no terminal could be
+ * launched.
+ */
+export function OpenTerminal(dir: string, command: string): Promise<void> {
+  return call<void>('OpenTerminal', dir, command);
 }
 
 /**
@@ -148,4 +186,13 @@ export function SelectDirectory(): Promise<string> {
 export function DiscoverRepos(root: string): Promise<RepoHit[]> {
   // Wails unwraps ([]RepoHit, error) — rejects on Go error.
   return call<RepoHit[]>('DiscoverRepos', root);
+}
+
+/**
+ * CommonLocations returns well-known dependency directories (editor extensions,
+ * global npm/Go/Cargo stores) that exist on this machine, for use as one-click
+ * scan targets. Returns an empty list if none are present.
+ */
+export function CommonLocations(): Promise<LocationHint[]> {
+  return call<LocationHint[]>('CommonLocations');
 }

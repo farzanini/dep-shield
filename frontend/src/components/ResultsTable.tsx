@@ -17,6 +17,8 @@ export interface PackageRow {
   hasFix: boolean;
   fixedIn: string;
   fixCommand: string;    // e.g. "npm install lodash@4.17.21"
+  repoPath: string;      // directory to run fixCommand in (project root)
+  path: string;          // where the package was found
   vulns: ScoredVuln[];
 }
 
@@ -65,6 +67,15 @@ const ALL_SOURCES = [
 // ── Grouping helpers ──────────────────────────────────────────────────────────
 
 function buildFixCommand(pkg: string, fixedIn: string, ecosystem: string): string {
+  // System package managers can be upgraded even when the advisory reports no
+  // fixed version — just pull the latest available package. The distro
+  // ecosystems are release-specific strings (e.g. "Debian:12", "Alpine:v3.19").
+  if (ecosystem === 'Homebrew') return `brew upgrade ${pkg}`;
+  if (ecosystem.startsWith('Debian:') || ecosystem.startsWith('Ubuntu:')) {
+    return `sudo apt-get install --only-upgrade ${pkg}`;
+  }
+  if (ecosystem.startsWith('Alpine:')) return `sudo apk upgrade ${pkg}`;
+
   if (!fixedIn) return '';
   switch (ecosystem) {
     case 'npm':       return `npm install ${pkg}@${fixedIn}`;
@@ -104,6 +115,8 @@ function groupIntoPackageRows(vulns: ScoredVuln[]): PackageRow[] {
         hasFix: v.hasFix,
         fixedIn: v.fixedIn,
         fixCommand: buildFixCommand(v.package, v.fixedIn, v.ecosystem),
+        repoPath: v.repoPath,
+        path: v.path,
         vulns: [v],
       });
     }

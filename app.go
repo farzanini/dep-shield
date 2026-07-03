@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -44,6 +45,7 @@ import (
 	"github.com/dep-shield/dep-shield/internal/reporter"
 	"github.com/dep-shield/dep-shield/internal/scanner"
 	"github.com/dep-shield/dep-shield/internal/scorer"
+	"github.com/dep-shield/dep-shield/internal/syspkg"
 )
 
 // ── Shared types (serialised to JSON for the frontend) ────────────────────────
@@ -80,6 +82,8 @@ type ScoredVuln struct {
 	DaysSincePublished int      `json:"daysSincePublished"`
 	Source             string   `json:"source"`      // "project" | "vscode-ext" | "cursor-ext" | "global" | "system"
 	SourceLabel        string   `json:"sourceLabel"` // human-readable label
+	Path               string   `json:"path"`        // where the package was found (e.g. the node_modules dir)
+	RepoPath           string   `json:"repoPath"`    // directory the fix command should be run in (project root)
 }
 
 // FixSuggestion is returned by GetSuggestedFix.
@@ -155,6 +159,132 @@ func (a *App) StartScan(path string) {
 	go a.runScan(scanCtx, path)
 }
 
+// StartScanRepo clones a remote git repository and scans the checkout. url may
+// be an https:// URL (token used for private repos) or an SSH URL (git@… /
+// ssh://…, authenticated via the user's SSH keys). Progress is streamed via the
+// same "scan:progress" / "scan:complete" events as StartScan.
+func (a *App) StartScanRepo(url, token string) {
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
+
+	a.mu.Lock()
+	a.results = nil
+	a.rawPkgs = nil
+	a.mu.Unlock()
+
+	scanCtx, cancel := context.WithCancel(context.Background())
+	a.scanCancel = cancel
+
+	go a.runRepoScan(scanCtx, url, token)
+}
+
+// runRepoScan clones url into a temp directory, scans it, then removes it.
+func (a *App) runRepoScan(ctx context.Context, url, token string) {
+	a.emit("scan:progress", ScanProgress{
+		Phase:   "cloning",
+		Percent: 0,
+		Message: "Cloning repository…",
+		Current: url,
+	})
+
+	dir, cleanup, err := cloneRepo(ctx, url, token, a.log)
+	if err != nil {
+		a.emit("scan:progress", ScanProgress{
+			Phase:   "error",
+			Message: "Could not clone repository",
+			Error:   err.Error(),
+			Percent: 0,
+		})
+		a.emit("scan:complete", false)
+		a.log.Error("clone failed", zap.Error(err))
+		return
+	}
+	defer cleanup()
+
+	a.runScan(ctx, dir)
+}
+
+// StartSystemScan scans the host's system package managers (dpkg/apt, apk,
+// Homebrew) for vulnerable OS packages. It returns immediately; progress
+// streams via the same "scan:progress" / "scan:complete" events as StartScan.
+func (a *App) StartSystemScan() {
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
+
+	a.mu.Lock()
+	a.results = nil
+	a.rawPkgs = nil
+	a.mu.Unlock()
+
+	scanCtx, cancel := context.WithCancel(context.Background())
+	a.scanCancel = cancel
+
+	go a.runSystemScan(scanCtx)
+}
+
+// runSystemScan enumerates installed packages from every available system
+// package manager, then runs them through the shared CVE → score pipeline.
+func (a *App) runSystemScan(ctx context.Context) {
+	progress := func(p ScanProgress) {
+		a.emit("scan:progress", p)
+		a.log.Info("system scan progress",
+			zap.String("phase", p.Phase), zap.String("message", p.Message))
+	}
+	fail := func(msg string, err error) {
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		a.emit("scan:progress", ScanProgress{Phase: "error", Message: msg, Error: errStr})
+		a.emit("scan:complete", false)
+		a.log.Error(msg, zap.Error(err))
+	}
+
+	progress(ScanProgress{
+		Phase:   "collecting",
+		Percent: 0,
+		Message: "Enumerating system packages…",
+	})
+
+	collectors := syspkg.Detect(a.log)
+	if len(collectors) == 0 {
+		fail("No supported system package manager found on this host", nil)
+		return
+	}
+
+	var pkgs []models.Package
+	for _, c := range collectors {
+		if ctx.Err() != nil {
+			fail("Scan cancelled", ctx.Err())
+			return
+		}
+		got, err := c.Collect(ctx)
+		if err != nil {
+			a.log.Warn("system collector failed",
+				zap.String("manager", c.Name()), zap.Error(err))
+			continue
+		}
+		pkgs = append(pkgs, got...)
+		progress(ScanProgress{
+			Phase:   "collecting",
+			Found:   len(pkgs),
+			Percent: 15,
+			Message: fmt.Sprintf("Collected %d package%s (%s)…",
+				len(pkgs), plural(len(pkgs), "", "s"), c.Name()),
+			Current: c.Name(),
+		})
+	}
+
+	if len(pkgs) == 0 {
+		fail("No system packages found to scan", nil)
+		return
+	}
+
+	a.queryScoreEmit(ctx, pkgs, len(pkgs), progress, fail)
+}
+
 // GetResults returns the vulnerability findings from the most recent completed
 // scan.  Returns nil (JSON: null) if no scan has completed yet.
 func (a *App) GetResults() []ScoredVuln {
@@ -176,6 +306,91 @@ func (a *App) GetResults() []ScoredVuln {
 // Used by the frontend to let users navigate to CVE references.
 func (a *App) OpenInBrowser(url string) {
 	wailsrt.BrowserOpenURL(a.ctx, url)
+}
+
+// OpenTerminal opens the system terminal with its working directory set to dir
+// and, where the platform allows, the given command pre-filled at the prompt
+// (typed but NOT executed, so the user reviews it and presses Enter). When dir
+// is empty (e.g. a system package whose fix is machine-wide) it falls back to
+// the home directory. Returns an error the frontend can surface.
+func (a *App) OpenTerminal(dir, command string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = home
+		}
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", dir)
+	}
+
+	cmd, err := terminalCommand(dir, strings.TrimSpace(command))
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		a.log.Error("open terminal failed", zap.String("dir", dir), zap.Error(err))
+		return fmt.Errorf("could not open a terminal: %w", err)
+	}
+	a.log.Info("opened terminal", zap.String("dir", dir), zap.Bool("prefilled", command != ""))
+	return nil
+}
+
+// terminalCommand builds the platform-specific command that launches a terminal
+// with its working directory set to dir and, when command is non-empty and the
+// shell supports it, that command pre-filled at the prompt without running.
+func terminalCommand(dir, command string) (*exec.Cmd, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		// zsh (the macOS default) can push text onto the next prompt's edit
+		// buffer with `print -z`, pre-filling the command without executing it.
+		// For other shells we just open at the directory.
+		if command != "" && strings.Contains(os.Getenv("SHELL"), "zsh") {
+			inner := fmt.Sprintf("cd %s && print -z -- %s", shellQuote(dir), shellQuote(command))
+			// `activate` must be a separate statement from `do script`; combining
+			// them in one tell block makes Terminal's AppleEvent reply time out.
+			return exec.Command("osascript",
+				"-e", "tell application \"Terminal\" to do script "+appleScriptQuote(inner),
+				"-e", `tell application "Terminal" to activate`), nil
+		}
+		return exec.Command("open", "-a", "Terminal", dir), nil
+	case "windows":
+		if _, err := exec.LookPath("wt.exe"); err == nil {
+			return exec.Command("wt.exe", "-d", dir), nil
+		}
+		return exec.Command("cmd", "/c", "start", "cmd", "/k", "cd /d "+dir), nil
+	default: // linux and other unixes: try common emulators in order
+		candidates := []struct {
+			bin  string
+			args []string
+		}{
+			{"x-terminal-emulator", []string{"--working-directory=" + dir}},
+			{"gnome-terminal", []string{"--working-directory=" + dir}},
+			{"konsole", []string{"--workdir", dir}},
+			{"xfce4-terminal", []string{"--working-directory=" + dir}},
+			{"xterm", []string{"-e", "cd '" + dir + "' && exec ${SHELL:-sh}"}},
+		}
+		for _, c := range candidates {
+			if _, err := exec.LookPath(c.bin); err == nil {
+				return exec.Command(c.bin, c.args...), nil
+			}
+		}
+		return nil, fmt.Errorf("no supported terminal emulator found on PATH")
+	}
+}
+
+// shellQuote wraps s in single quotes for safe use in a POSIX shell command,
+// escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// appleScriptQuote wraps s as an AppleScript string literal, escaping
+// backslashes and double quotes.
+func appleScriptQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 // SelectDirectory shows a native OS folder-picker dialog and returns the
@@ -278,8 +493,7 @@ func (a *App) DiscoverRepos(root string) ([]RepoHit, error) {
 			case "node_modules":
 				if !seen[full] {
 					seen[full] = true
-					src, lbl := deriveSource(full)
-					_ = src
+					_, lbl := deriveSource(full)
 					hits = append(hits, RepoHit{Path: full, Ecosystem: "npm", Label: lbl + " (node_modules)"})
 				}
 				// Don't recurse into node_modules — it can be enormous.
@@ -306,7 +520,99 @@ func (a *App) DiscoverRepos(root string) ([]RepoHit, error) {
 	}
 
 	walk(root, 0)
+
+	// Collapse npm duplicates: a project that has both a lockfile and its own
+	// node_modules produces two hits for the same project. The lockfile hit
+	// points at the project root (which already covers node_modules when
+	// scanned), so drop the redundant node_modules hit whenever a sibling
+	// lockfile hit exists. A node_modules with no lockfile is kept.
+	lockDirs := map[string]bool{}
+	for _, h := range hits {
+		if h.Ecosystem == "npm" && filepath.Base(h.Path) != "node_modules" {
+			lockDirs[h.Path] = true
+		}
+	}
+	filtered := hits[:0]
+	for _, h := range hits {
+		if h.Ecosystem == "npm" && filepath.Base(h.Path) == "node_modules" && lockDirs[filepath.Dir(h.Path)] {
+			continue
+		}
+		filtered = append(filtered, h)
+	}
+	hits = filtered
+
 	return hits, nil
+}
+
+// LocationHint is a well-known directory where third-party packages tend to
+// accumulate — editor extensions, global package installs, language caches —
+// that a user might not think to scan but where vulnerable code often hides.
+type LocationHint struct {
+	Label string `json:"label"`
+	Path  string `json:"path"`
+	Note  string `json:"note"` // ecosystem hint, e.g. "npm", "Go"
+}
+
+// CommonLocations returns dependency hot-spots that actually exist on the
+// current machine, so the UI can offer them as one-click scan targets. Only
+// existing directories are returned — the list never contains a dead path.
+func (a *App) CommonLocations() []LocationHint {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	j := filepath.Join
+
+	type cand struct{ label, path, note string }
+	cands := []cand{
+		{"VS Code extensions", j(home, ".vscode", "extensions"), "npm"},
+		{"VS Code Insiders extensions", j(home, ".vscode-insiders", "extensions"), "npm"},
+		{"VS Code Server extensions (remote/WSL)", j(home, ".vscode-server", "extensions"), "npm"},
+		{"Cursor extensions", j(home, ".cursor", "extensions"), "npm"},
+		{"Windsurf extensions", j(home, ".windsurf", "extensions"), "npm"},
+		{"VSCodium extensions", j(home, ".vscode-oss", "extensions"), "npm"},
+		{"npx package cache", j(home, ".npm", "_npx"), "npm"},
+		{"Cargo registry", j(home, ".cargo", "registry"), "crates.io"},
+		{"Python user packages", j(home, ".local", "lib"), "PyPI"},
+	}
+
+	// Go module cache: honour GOPATH if set, else the ~/go default.
+	goPath := os.Getenv("GOPATH")
+	if goPath == "" {
+		goPath = j(home, "go")
+	}
+	cands = append(cands, cand{"Go module cache", j(goPath, "pkg", "mod"), "Go"})
+
+	// Global npm installs: Homebrew (Apple Silicon / Intel), /usr/local, and
+	// the Windows per-user store under %APPDATA%.
+	cands = append(cands,
+		cand{"Global npm (Homebrew, Apple Silicon)", "/opt/homebrew/lib/node_modules", "npm"},
+		cand{"Global npm (/usr/local)", "/usr/local/lib/node_modules", "npm"},
+	)
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		cands = append(cands, cand{"Global npm (Windows)", j(appData, "npm", "node_modules"), "npm"})
+	}
+
+	// nvm keeps a separate global node_modules per installed Node version; offer
+	// the newest (versions sort lexically, newest last).
+	if matches, _ := filepath.Glob(j(home, ".nvm", "versions", "node", "*", "lib", "node_modules")); len(matches) > 0 {
+		latest := matches[len(matches)-1]
+		ver := filepath.Base(filepath.Dir(filepath.Dir(latest))) // …/node/<ver>/lib/node_modules
+		cands = append(cands, cand{"Global npm (nvm " + ver + ")", latest, "npm"})
+	}
+
+	out := make([]LocationHint, 0, len(cands))
+	seen := map[string]bool{}
+	for _, c := range cands {
+		if seen[c.path] {
+			continue
+		}
+		if info, err := os.Stat(c.path); err == nil && info.IsDir() {
+			seen[c.path] = true
+			out = append(out, LocationHint{Label: c.label, Path: c.path, Note: c.note})
+		}
+	}
+	return out
 }
 
 // ExportReport prompts the user for a save location and writes an HTML report.
@@ -446,6 +752,22 @@ func (a *App) runScan(ctx context.Context, path string) {
 		})
 	}
 
+	// Also detect projects by their committed manifests/lockfiles (go.mod,
+	// package-lock.json, Cargo.lock, requirements.txt, …). This catches
+	// checkouts — e.g. a freshly cloned repo — that have lockfiles but no
+	// installed node_modules/site-packages for the store-based walk to find.
+	hits = mergeHits(hits, manifestHits(ctx, path, 8))
+	if len(hits) != found {
+		found = len(hits)
+		progress(ScanProgress{
+			Phase:   "walking",
+			Found:   found,
+			Percent: 15,
+			Message: fmt.Sprintf("Found %d dependency location%s…", found, plural(found, "", "s")),
+			Current: path,
+		})
+	}
+
 	if len(hits) == 0 {
 		fail("No dependency directories found in "+path, nil)
 		return
@@ -478,13 +800,24 @@ func (a *App) runScan(ctx context.Context, path string) {
 	a.rawPkgs = pkgs
 	a.mu.Unlock()
 
+	// ── Phases 3–4: query CVE databases, score, emit completion ───────────────
+	a.queryScoreEmit(ctx, parser.ToModels(pkgs), found, progress, fail)
+}
+
+// queryScoreEmit runs the CVE query, scoring, result storage, and completion
+// events for an already-collected package set. It is the shared tail of both
+// runScan (filesystem) and runSystemScan (system package managers). found is
+// the location/manager count reported in earlier progress events.
+func (a *App) queryScoreEmit(ctx context.Context, modelPkgs []models.Package, found int, progress func(ScanProgress), fail func(string, error)) {
+	nPkgs := len(modelPkgs)
+
 	// ── Phase 3: Query CVE databases ──────────────────────────────────────────
 	progress(ScanProgress{
 		Phase:   "querying",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Percent: 50,
-		Message: fmt.Sprintf("Querying CVE databases for %d package%s…", len(pkgs), plural(len(pkgs), "", "s")),
+		Message: fmt.Sprintf("Querying CVE databases for %d package%s…", nPkgs, plural(nPkgs, "", "s")),
 	})
 
 	cveClient := cve.NewClient(cve.Options{
@@ -493,7 +826,6 @@ func (a *App) runScan(ctx context.Context, path string) {
 		Log:         a.log,
 	})
 
-	modelPkgs := parser.ToModels(pkgs)
 	vulns, err := cveClient.QueryAll(ctx, modelPkgs)
 	if err != nil && ctx.Err() != nil {
 		fail("Scan cancelled during CVE query", ctx.Err())
@@ -503,7 +835,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "querying",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: len(vulns),
 		Percent: 80,
 		Message: fmt.Sprintf("Found %d potential vulnerabilit%s", len(vulns), plural(len(vulns), "y", "ies")),
@@ -513,7 +845,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "scoring",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: len(vulns),
 		Percent: 90,
 		Message: "Scoring and sorting findings…",
@@ -534,12 +866,12 @@ func (a *App) runScan(ctx context.Context, path string) {
 	progress(ScanProgress{
 		Phase:   "done",
 		Found:   found,
-		Parsed:  len(pkgs),
+		Parsed:  nPkgs,
 		Queried: finalCount,
 		Percent: 100,
 		Message: fmt.Sprintf("Scan complete — %d vulnerabilit%s found across %d package%s",
 			finalCount, plural(finalCount, "y", "ies"),
-			len(pkgs), plural(len(pkgs), "", "s")),
+			nPkgs, plural(nPkgs, "", "s")),
 	})
 
 	a.emit("scan:complete", true)
@@ -613,23 +945,51 @@ func toScoredVuln(v models.Vulnerability) ScoredVuln {
 
 	src, srcLabel := deriveSource(v.AffectedPkg.Path)
 
-	return ScoredVuln{
-		ID:          v.ID,
-		CVE:         cveID,
-		Severity:    string(v.Severity),
-		CVSS:        v.CVSS,
-		NormScore:   v.CVSS, // scorer currently stores NormalisedScore back through Vulnerability
-		Package:     v.AffectedPkg.Name,
-		Version:     v.AffectedPkg.Version,
-		Ecosystem:   string(v.AffectedPkg.Ecosystem),
-		FixedIn:     v.FixedIn,
-		HasFix:      v.FixedIn != "",
-		FixAdvice:   buildAdvice(v),
-		Summary:     v.Summary,
-		References:  refs,
-		Source:      src,
-		SourceLabel: srcLabel,
+	// FixAdvice is populated by the scorer; fall back to deriving it locally
+	// for any vulnerability that never passed through Score() (e.g. tests).
+	advice := v.FixAdvice
+	if advice == "" {
+		advice = buildAdvice(v)
 	}
+
+	return ScoredVuln{
+		ID:                 v.ID,
+		CVE:                cveID,
+		Severity:           string(v.Severity),
+		CVSS:               v.CVSS,
+		NormScore:          v.NormScore,
+		Package:            v.AffectedPkg.Name,
+		Version:            v.AffectedPkg.Version,
+		Ecosystem:          string(v.AffectedPkg.Ecosystem),
+		FixedIn:            v.FixedIn,
+		HasFix:             v.FixedIn != "",
+		FixAdvice:          advice,
+		Summary:            v.Summary,
+		References:         refs,
+		DaysSincePublished: v.DaysSincePublished,
+		Source:             src,
+		SourceLabel:        srcLabel,
+		Path:               v.AffectedPkg.Path,
+		RepoPath:           fixDir(v.AffectedPkg.Path),
+	}
+}
+
+// fixDir returns the directory a fix command (e.g. `npm install …`) should be
+// run in. The npm scanner records the node_modules directory, so the project
+// root — where package.json lives — is its parent. For Go/Cargo/PyPI the
+// recorded path is already the manifest/project directory, so it's used as-is.
+func fixDir(pkgPath string) string {
+	if pkgPath == "" {
+		return ""
+	}
+	sep := string(filepath.Separator)
+	if i := strings.LastIndex(pkgPath, sep+"node_modules"); i >= 0 {
+		return pkgPath[:i]
+	}
+	if filepath.Base(pkgPath) == "node_modules" {
+		return filepath.Dir(pkgPath)
+	}
+	return pkgPath
 }
 
 func buildAdvice(v models.Vulnerability) string {

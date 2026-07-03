@@ -1,0 +1,12 @@
+# Compiled binaries / build output
+/dep-shield
+/build/bin/
+
+# Generated knowledge graph (rebuild with `graphify update .`)
+/graphify-out/
+
+# Auto-generated Wails bindings; the hand-maintained shim lives in frontend/src/wailsjs
+/frontend/wailsjs/
+
+# Scratch reports
+/app_state_report.md

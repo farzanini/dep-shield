@@ -27,6 +27,7 @@ import (
 	"github.com/dep-shield/dep-shield/internal/reporter"
 	"github.com/dep-shield/dep-shield/internal/scanner"
 	"github.com/dep-shield/dep-shield/internal/scorer"
+	"github.com/dep-shield/dep-shield/internal/syspkg"
 )
 
 // scanFlags holds all flags specific to the scan sub-command.
@@ -67,6 +68,11 @@ type scanFlags struct {
 	// OfflineMode skips all network requests and uses only locally cached
 	// advisory data (if any).  Useful on air-gapped systems.
 	OfflineMode bool
+
+	// System also scans the host's system package managers (dpkg/apt, apk,
+	// Homebrew). When set without any paths, only the system managers are
+	// scanned (the filesystem walk is skipped).
+	System bool
 }
 
 // scanCmd constructs and returns the cobra.Command for "dep-shield scan".
@@ -122,6 +128,9 @@ Examples:
 		"also write an HTML report to this file")
 	f.BoolVar(&sf.OfflineMode, "offline", false,
 		"skip network requests; use only cached advisory data")
+	f.BoolVar(&sf.System, "system", false,
+		"also scan system package managers (dpkg/apt, apk, Homebrew); "+
+			"with no paths, scans only those")
 
 	return cmd
 }
@@ -140,62 +149,83 @@ func runScan(ctx context.Context, sf scanFlags) error {
 	}
 
 	// ── 1. Resolve scan roots ─────────────────────────────────────────────────
+	// A filesystem scan runs unless --system was given with no explicit paths,
+	// in which case only the system package managers are scanned.
 	paths := sf.Paths
-	if len(paths) == 0 {
+	scanFS := len(paths) > 0 || !sf.System
+	if scanFS && len(paths) == 0 {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("resolving home directory: %w", err)
 		}
 		paths = []string{home}
 	}
-	log.Info("starting scan", zap.Strings("paths", paths))
+	log.Info("starting scan", zap.Strings("paths", paths), zap.Bool("system", sf.System))
 
-	// ── 2. Walk filesystem ────────────────────────────────────────────────────
-	// TODO: replace stub call with real scanner.New(paths, log).Scan(ctx)
-	w := scanner.New(scanner.Options{
-		Roots:       paths,
-		Ecosystems:  sf.Ecosystems,
-		Log:         log,
-	})
-	dirs, err := w.Walk(ctx)
-	if err != nil {
-		return fmt.Errorf("filesystem walk: %w", err)
+	// ── 2–3. Walk filesystem and parse manifests ──────────────────────────────
+	var pkgs []parser.Package
+	if scanFS {
+		w := scanner.New(scanner.Options{
+			Roots:      paths,
+			Ecosystems: sf.Ecosystems,
+			Log:        log,
+		})
+		dirs, err := w.Walk(ctx)
+		if err != nil {
+			return fmt.Errorf("filesystem walk: %w", err)
+		}
+		log.Info("walk complete", zap.Int("directories", len(dirs)))
+
+		p := parser.New(log)
+		pkgs, err = p.ParseAll(ctx, dirs)
+		if err != nil {
+			return fmt.Errorf("parsing packages: %w", err)
+		}
+		log.Info("parsing complete", zap.Int("packages", len(pkgs)))
 	}
-	log.Info("walk complete", zap.Int("directories", len(dirs)))
 
-	// ── 3. Parse lockfiles / manifests ────────────────────────────────────────
-	// TODO: replace stub call with real parser.ParseAll(ctx, dirs, log)
-	p := parser.New(log)
-	pkgs, err := p.ParseAll(ctx, dirs)
-	if err != nil {
-		return fmt.Errorf("parsing packages: %w", err)
+	// ── 4. Collect system packages (optional) and merge ───────────────────────
+	modelPkgs := parser.ToModels(pkgs)
+	if sf.System {
+		for _, c := range syspkg.Detect(log) {
+			got, err := c.Collect(ctx)
+			if err != nil {
+				log.Warn("system collector failed",
+					zap.String("manager", c.Name()), zap.Error(err))
+				continue
+			}
+			log.Info("system packages collected",
+				zap.String("manager", c.Name()), zap.Int("packages", len(got)))
+			modelPkgs = append(modelPkgs, got...)
+		}
 	}
-	log.Info("parsing complete", zap.Int("packages", len(pkgs)))
 
-	// ── 4. Query CVE databases ────────────────────────────────────────────────
-	// TODO: replace stub call with real cve.NewClient(sf.OfflineMode, log)
+	if len(modelPkgs) == 0 {
+		return fmt.Errorf("no packages found to scan")
+	}
+
+	// ── 5. Query CVE databases ────────────────────────────────────────────────
 	cveClient := cve.NewClient(cve.Options{
 		Offline: sf.OfflineMode,
 		Workers: sf.Workers,
 		Log:     log,
 	})
-	vulns, err := cveClient.QueryAll(ctx, parser.ToModels(pkgs))
+	vulns, err := cveClient.QueryAll(ctx, modelPkgs)
 	if err != nil {
 		return fmt.Errorf("CVE query: %w", err)
 	}
 	log.Info("CVE query complete", zap.Int("vulnerabilities", len(vulns)))
 
-	// ── 5. Score and filter ───────────────────────────────────────────────────
-	// TODO: replace stub call with real scorer.Score(vulns, sf.MinSeverity)
+	// ── 6. Score and filter ───────────────────────────────────────────────────
 	sc := scorer.New(log)
 	result, err := sc.Score(vulns, models.Severity(sf.MinSeverity))
 	if err != nil {
 		return fmt.Errorf("scoring: %w", err)
 	}
 	result.ScannedPaths = paths
-	result.TotalPackages = len(pkgs)
+	result.TotalPackages = len(modelPkgs)
 
-	// ── 6. Render output ──────────────────────────────────────────────────────
+	// ── 7. Render output ──────────────────────────────────────────────────────
 	rep := reporter.New(reporter.Options{
 		NoColour: flags.NoColour,
 		Format:   flags.Output,

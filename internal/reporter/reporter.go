@@ -97,6 +97,20 @@ func New(opts Options) Reporter {
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
+// writeFileAs creates (or truncates) path and renders result into it using a
+// reporter selected by format, regardless of which concrete reporter WriteFile
+// was called on. File output never carries ANSI colour codes.
+func writeFileAs(path string, format Format, result models.ScanResult, log *zap.Logger) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer f.Close()
+
+	rep := New(Options{Format: string(format), NoColour: true, Log: log})
+	return rep.Write(f, result)
+}
+
 // severityColor maps severity levels to fatih/color attributes.
 // fatih/color handles the NoColor global flag automatically.
 var severityColor = map[models.Severity]*color.Color{
@@ -130,41 +144,37 @@ type tableReporter struct {
 
 // Write renders result as a coloured, tab-aligned table to w.
 func (r *tableReporter) Write(w io.Writer, result models.ScanResult) error {
-	// TODO: implement full table rendering
-	//   1. Write header row via tabwriter
-	//   2. For each vuln (already sorted by scorer):
-	//        col1 = severity with ANSI colour
-	//        col2 = CVSS score ("%.1f")
-	//        col3 = ID (CVE- or GHSA-)
-	//        col4 = package name
-	//        col5 = current version
-	//        col6 = fixed-in version (or "none known")
-	//        col7 = truncated summary (60 chars)
-	//   3. Write totals line
-	//   4. Write per-severity counts (CRITICAL:N HIGH:N …)
+	if len(result.Vulnerabilities) == 0 {
+		fmt.Fprintf(w, "No known vulnerabilities found across %d package(s) in %d path(s). ✓\n",
+			result.TotalPackages, len(result.ScannedPaths))
+		return nil
+	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	defer tw.Flush()
 
-	// Keep imports alive until implementation.
-	_ = strings.Repeat
-	_ = severityColor
-	_ = severityLabel
-	_ = truncate
-	_ = color.NoColor
-
-	// Placeholder header.
 	fmt.Fprintln(tw, "SEVERITY\tCVSS\tID\tPACKAGE\tVERSION\tFIX\tSUMMARY")
-	fmt.Fprintln(tw, strings.Repeat("-", 90))
+	fmt.Fprintln(tw, strings.Join([]string{
+		strings.Repeat("─", 8), strings.Repeat("─", 4), strings.Repeat("─", 18),
+		strings.Repeat("─", 16), strings.Repeat("─", 10), strings.Repeat("─", 12),
+		strings.Repeat("─", 40),
+	}, "\t"))
 
+	counts := make(map[models.Severity]int)
 	for _, v := range result.Vulnerabilities {
-		// TODO: apply severityColor[v.Severity].Sprintf(...)
+		counts[v.Severity]++
+
 		fix := v.FixedIn
 		if fix == "" {
 			fix = "none known"
 		}
+
+		sev := severityLabel(v.Severity)
+		if c, ok := severityColor[v.Severity]; ok {
+			sev = c.Sprint(sev)
+		}
+
 		fmt.Fprintf(tw, "%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n",
-			severityLabel(v.Severity),
+			sev,
 			v.CVSS,
 			v.ID,
 			v.AffectedPkg.Name,
@@ -173,22 +183,49 @@ func (r *tableReporter) Write(w io.Writer, result models.ScanResult) error {
 			truncate(v.Summary, 60),
 		)
 	}
+	tw.Flush()
 
-	fmt.Fprintf(w, "\nScanned %d packages across %d path(s). Found %d vulnerabilities.\n",
-		result.TotalPackages, len(result.ScannedPaths), len(result.Vulnerabilities))
+	fmt.Fprintf(w, "\nScanned %d package(s) across %d path(s). Found %d vulnerabilit%s.\n",
+		result.TotalPackages, len(result.ScannedPaths), len(result.Vulnerabilities),
+		plural(len(result.Vulnerabilities)))
+	fmt.Fprintln(w, severityBreakdown(counts))
 	return nil
 }
 
-// WriteFile implements Reporter.
-func (r *tableReporter) WriteFile(path string, format Format, result models.ScanResult) error {
-	// TODO: open path, call the right Write* method based on format
-	_ = format
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
+// plural returns "y" for a single item and "ies" otherwise, for "vulnerabilit_".
+func plural(n int) string {
+	if n == 1 {
+		return "y"
 	}
-	defer f.Close()
-	return r.Write(f, result)
+	return "ies"
+}
+
+// severityBreakdown renders a coloured "CRITICAL:N HIGH:N …" summary line,
+// ordered from most to least severe and omitting severities with no findings.
+func severityBreakdown(counts map[models.Severity]int) string {
+	order := []models.Severity{
+		models.SeverityCritical, models.SeverityHigh,
+		models.SeverityMedium, models.SeverityLow, models.SeverityUnknown,
+	}
+	parts := make([]string, 0, len(order))
+	for _, s := range order {
+		n := counts[s]
+		if n == 0 {
+			continue
+		}
+		label := fmt.Sprintf("%s:%d", string(s), n)
+		if c, ok := severityColor[s]; ok {
+			label = c.Sprint(label)
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, "  ")
+}
+
+// WriteFile implements Reporter, dispatching on the requested format so callers
+// can export a different format than the reporter was constructed with.
+func (r *tableReporter) WriteFile(path string, format Format, result models.ScanResult) error {
+	return writeFileAs(path, format, result, r.log)
 }
 
 // ── JSON reporter ─────────────────────────────────────────────────────────────
@@ -199,19 +236,17 @@ type jsonReporter struct {
 
 // Write serialises result as indented JSON to w.
 func (r *jsonReporter) Write(w io.Writer, result models.ScanResult) error {
-	// TODO: implement
-	//   enc := json.NewEncoder(w)
-	//   enc.SetIndent("", "  ")
-	//   return enc.Encode(result)
-	_ = json.NewEncoder // import kept alive
-	return fmt.Errorf("TODO: jsonReporter.Write not implemented")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(result); err != nil {
+		return fmt.Errorf("encoding JSON report: %w", err)
+	}
+	return nil
 }
 
 // WriteFile implements Reporter.
 func (r *jsonReporter) WriteFile(path string, format Format, result models.ScanResult) error {
-	// TODO: implement — open file, call Write
-	_ = format
-	return fmt.Errorf("TODO: jsonReporter.WriteFile not implemented")
+	return writeFileAs(path, format, result, r.log)
 }
 
 // ── HTML reporter ─────────────────────────────────────────────────────────────
@@ -309,12 +344,5 @@ func (r *htmlReporter) Write(w io.Writer, result models.ScanResult) error {
 
 // WriteFile implements Reporter.
 func (r *htmlReporter) WriteFile(path string, format Format, result models.ScanResult) error {
-	// TODO: open path, call Write
-	_ = format
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
-	}
-	defer f.Close()
-	return r.Write(f, result)
+	return writeFileAs(path, format, result, r.log)
 }

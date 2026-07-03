@@ -10,9 +10,10 @@
 package scorer
 
 import (
-	"context"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,31 +33,6 @@ type Scorer interface {
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
-
-// RiskScore is an enriched view of a single vulnerability.
-// It extends models.Vulnerability with fields that are computed during scoring
-// rather than fetched from the CVE database.
-type RiskScore struct {
-	models.Vulnerability
-
-	// NormalisedScore is a 0–10 float that combines CVSS with contextual
-	// signals.  Higher is worse.
-	NormalisedScore float64
-
-	// HasFix is true when FixedIn is non-empty.
-	// Pre-computed here so templates and table renderers don't need to repeat
-	// the string-empty check.
-	HasFix bool
-
-	// DaysSincePublished is the age of the advisory in days.
-	// Older unfixed vulnerabilities are considered higher risk because they
-	// have had more time to be exploited.
-	DaysSincePublished int
-
-	// FixAdvice is a human-readable upgrade suggestion, e.g.
-	// "Upgrade lodash from 4.17.20 to 4.17.21"
-	FixAdvice string
-}
 
 // ScoringContext carries signals that influence scoring beyond raw CVSS.
 // Fields are optional; zero values cause that signal to be ignored.
@@ -91,65 +67,59 @@ func (s *scorer) Score(
 	vulns []models.Vulnerability,
 	minSeverity models.Severity,
 ) (models.ScanResult, error) {
-	// TODO: implement
-	//   1. filter vulns where SeverityRank(v.Severity) >= SeverityRank(minSeverity)
-	//   2. call scoreOne(v) for each remaining vuln
-	//   3. sort by NormalisedScore descending
-	//   4. wrap in models.ScanResult
-
 	filtered := filterBySeverity(vulns, minSeverity)
-	scored := make([]RiskScore, 0, len(filtered))
+
+	out := make([]models.Vulnerability, 0, len(filtered))
 	for _, v := range filtered {
-		rs, err := s.scoreOne(v, ScoringContext{})
-		if err != nil {
-			s.log.Warn("scoring failed for vuln",
-				zap.String("id", v.ID), zap.Error(err))
-			continue
-		}
-		scored = append(scored, rs)
+		// Derive the scoring context from data the CVE client and parser
+		// already attached to the vulnerability, rather than an empty context.
+		out = append(out, s.scoreOne(v, ScoringContext{
+			PublishedAt:        v.Published,
+			IsDirectDependency: v.AffectedPkg.Direct,
+		}))
 	}
 
 	// Sort highest risk first.
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].NormalisedScore > scored[j].NormalisedScore
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].NormScore > out[j].NormScore
 	})
-
-	// Flatten back to []models.Vulnerability for the ScanResult.
-	out := make([]models.Vulnerability, len(scored))
-	for i, rs := range scored {
-		out[i] = rs.Vulnerability
-	}
 
 	return models.ScanResult{Vulnerabilities: out}, nil
 }
 
-// scoreOne computes a RiskScore for a single vulnerability.
-// TODO: implement the scoring formula described below.
-func (s *scorer) scoreOne(v models.Vulnerability, sctx ScoringContext) (RiskScore, error) {
-	// TODO: implement scoring formula:
-	//
-	//   base   = v.CVSS  (0–10)
-	//   bonus  += 0.5 if no fix is available (unfixed = more dangerous)
-	//   bonus  += 0.3 if sctx.IsDirectDependency
-	//   bonus  += min(0.2, daysSince/365*0.2) for age
-	//   capped at 10.0
-	//
-	//   NormalisedScore = min(base + bonus, 10.0)
-	//   FixAdvice = "Upgrade <name> from <current> to <fixed>" if HasFix
-	//             = "No fix available; consider removing or replacing <name>"
+// scoreOne returns v with its scorer-computed fields (NormScore,
+// DaysSincePublished, FixAdvice) populated. The input is copied by value, so
+// the caller's vulnerability is left untouched.
+func (s *scorer) scoreOne(v models.Vulnerability, sctx ScoringContext) models.Vulnerability {
+	hasFix := v.FixedIn != ""
 
-	_ = sctx
-	_ = fmt.Sprintf // import kept alive
-	_ = context.Background // import kept alive
-	_ = time.Since // import kept alive
-
-	rs := RiskScore{
-		Vulnerability:   v,
-		NormalisedScore: v.CVSS, // placeholder until TODO is implemented
-		HasFix:          v.FixedIn != "",
-		FixAdvice:       buildFixAdvice(v),
+	// Contextual bonuses layered on top of the raw CVSS base score.
+	base := v.CVSS
+	bonus := 0.0
+	if !hasFix {
+		// Unfixed vulnerabilities are more dangerous — no upgrade path exists.
+		bonus += 0.5
 	}
-	return rs, nil
+	if sctx.IsDirectDependency {
+		// Direct deps are more likely to sit in the critical path.
+		bonus += 0.3
+	}
+
+	// Age bonus: older findings have had more time to be exploited.
+	// Scales linearly up to a +0.2 cap at one year and beyond.
+	daysSince := 0
+	if !sctx.PublishedAt.IsZero() {
+		daysSince = int(time.Since(sctx.PublishedAt).Hours() / 24)
+		if daysSince < 0 {
+			daysSince = 0
+		}
+		bonus += math.Min(0.2, float64(daysSince)/365.0*0.2)
+	}
+
+	v.NormScore = math.Min(base+bonus, 10.0)
+	v.DaysSincePublished = daysSince
+	v.FixAdvice = buildFixAdvice(v)
+	return v
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -167,16 +137,36 @@ func filterBySeverity(vulns []models.Vulnerability, min models.Severity) []model
 }
 
 // buildFixAdvice produces a one-line fix suggestion string.
-// TODO: enrich with registry links once the parser provides package metadata.
 func buildFixAdvice(v models.Vulnerability) string {
-	if v.FixedIn == "" {
+	if v.FixedIn != "" {
 		return fmt.Sprintf(
-			"No fix available — consider replacing %s", v.AffectedPkg.Name)
+			"Upgrade %s from %s to %s",
+			v.AffectedPkg.Name,
+			v.AffectedPkg.Version,
+			v.FixedIn,
+		)
+	}
+	// System package advisories often omit a fixed version even though an
+	// upgrade path exists via the OS package manager, so don't suggest
+	// "replacing" a system library the way we might an abandoned library.
+	if isSystemEcosystem(v.AffectedPkg.Ecosystem) {
+		return fmt.Sprintf(
+			"No fixed version listed — update %s to the latest via your package manager",
+			v.AffectedPkg.Name)
 	}
 	return fmt.Sprintf(
-		"Upgrade %s from %s to %s",
-		v.AffectedPkg.Name,
-		v.AffectedPkg.Version,
-		v.FixedIn,
-	)
+		"No fixed version available yet — monitor for an update or consider replacing %s",
+		v.AffectedPkg.Name)
+}
+
+// isSystemEcosystem reports whether e is an OS package-manager ecosystem. The
+// distro ecosystems are release-specific strings (e.g. "Debian:12").
+func isSystemEcosystem(e models.Ecosystem) bool {
+	if e == models.EcosystemHomebrew {
+		return true
+	}
+	s := string(e)
+	return strings.HasPrefix(s, "Debian:") ||
+		strings.HasPrefix(s, "Ubuntu:") ||
+		strings.HasPrefix(s, "Alpine:")
 }

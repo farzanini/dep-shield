@@ -686,8 +686,8 @@ func TestScan_SkipVirtualFS(t *testing.T) {
 
 // ── Walk backward compatibility ───────────────────────────────────────────────
 
-// TestWalk_BackwardCompat verifies that the Walk method (used by parser.go and
-// the legacy cmd/dep-shield/root/scan.go) returns DirHit values correctly.
+// TestWalk_BackwardCompat verifies that the Walk method (used by parser.go)
+// returns DirHit values correctly.
 func TestWalk_BackwardCompat(t *testing.T) {
 	root, home := t.TempDir(), t.TempDir()
 	nm := mkdir(t, root, "project", "node_modules")
