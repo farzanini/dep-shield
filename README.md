@@ -28,34 +28,34 @@ Scanning /home/user/my-project
 ### Linux and macOS — one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
 ```
 
-The script auto-detects your OS and CPU architecture (amd64 or arm64), downloads the right binary from the [latest GitHub Release](https://github.com/dep-shield/dep-shield/releases/latest), verifies its sha256 checksum, and places the binary in `/usr/local/bin`.
+The script auto-detects your OS and CPU architecture (amd64 or arm64), downloads the right binary from the [latest GitHub Release](https://github.com/farzanini/dep-shield/releases/latest), verifies its sha256 checksum, and places the binary in `/usr/local/bin`.
 
 **Pin to a specific version:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh -s -- --version v1.2.3
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh -s -- --version v1.2.3
 ```
 
 **Install to a custom directory:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh -s -- --install-dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh -s -- --install-dir ~/.local/bin
 ```
 
 ### Windows — PowerShell
 
 ```powershell
-irm https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/farzanini/dep-shield/main/install.ps1 | iex
 ```
 
 *(PowerShell 5.1+ or PowerShell 7+ required.)*
 
 ### Manual download
 
-Download a pre-built binary for your platform from the [Releases page](https://github.com/dep-shield/dep-shield/releases):
+Download a pre-built binary for your platform from the [Releases page](https://github.com/farzanini/dep-shield/releases):
 
 | Platform | Architecture | File |
 |---|---|---|
@@ -74,10 +74,10 @@ sha256sum --check checksums.txt
 ### Build from source
 
 ```bash
-git clone https://github.com/dep-shield/dep-shield.git
+git clone https://github.com/farzanini/dep-shield.git
 cd dep-shield
 CGO_ENABLED=0 go build \
-  -ldflags="-s -w -X github.com/dep-shield/dep-shield/cmd.Version=$(git describe --tags --always)" \
+  -ldflags="-s -w -X github.com/farzanini/dep-shield/cmd.Version=$(git describe --tags --always)" \
   -o dep-shield .
 ```
 
@@ -242,7 +242,7 @@ jobs:
 
       - name: Install dep-shield
         run: |
-          curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+          curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
 
       - name: Scan dependencies
         run: dep-shield scan . --min-severity high
@@ -257,7 +257,7 @@ security-scan:
   image: alpine:3.20
   before_script:
     - apk add --no-cache curl
-    - curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+    - curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
   script:
     - dep-shield scan . --min-severity high
 ```
@@ -284,8 +284,8 @@ Every release publishes `checksums.txt` signed with the project's GPG key.
 
 ```bash
 # 1. Download the binary and checksums
-curl -fsSL -O https://github.com/dep-shield/dep-shield/releases/download/v1.2.3/dep-shield_v1.2.3_linux_amd64.tar.gz
-curl -fsSL -O https://github.com/dep-shield/dep-shield/releases/download/v1.2.3/checksums.txt
+curl -fsSL -O https://github.com/farzanini/dep-shield/releases/download/v1.2.3/dep-shield_v1.2.3_linux_amd64.tar.gz
+curl -fsSL -O https://github.com/farzanini/dep-shield/releases/download/v1.2.3/checksums.txt
 
 # 2. Verify the sha256 checksum
 sha256sum --check --ignore-missing checksums.txt
@@ -301,7 +301,7 @@ tar -xzf dep-shield_v1.2.3_linux_amd64.tar.gz
 
 ```bash
 # Clone
-git clone https://github.com/dep-shield/dep-shield.git
+git clone https://github.com/farzanini/dep-shield.git
 cd dep-shield
 
 # Run all Go tests

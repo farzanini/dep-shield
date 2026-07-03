@@ -17,9 +17,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/reporter"
-	"github.com/dep-shield/dep-shield/internal/scorer"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/reporter"
+	"github.com/farzanini/dep-shield/internal/scorer"
 )
 
 // reportFlags holds all flags specific to the report sub-command.

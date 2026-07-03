@@ -1,4 +1,4 @@
-module github.com/dep-shield/dep-shield
+module github.com/farzanini/dep-shield
 
 go 1.25.0
 

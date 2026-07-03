@@ -12,12 +12,12 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/cve"
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/parser"
-	"github.com/dep-shield/dep-shield/internal/scanner"
-	"github.com/dep-shield/dep-shield/internal/scorer"
-	"github.com/dep-shield/dep-shield/internal/syspkg"
+	"github.com/farzanini/dep-shield/internal/cve"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/parser"
+	"github.com/farzanini/dep-shield/internal/scanner"
+	"github.com/farzanini/dep-shield/internal/scorer"
+	"github.com/farzanini/dep-shield/internal/syspkg"
 )
 
 // Options configures a scan run.

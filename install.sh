@@ -2,10 +2,10 @@
 # install.sh — download and install dep-shield for the current platform.
 #
 # Usage (always installs the latest release):
-#   curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
 #
 # Usage (pin to a specific version):
-#   curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh -s -- --version v1.2.3
+#   curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh -s -- --version v1.2.3
 #
 # Flags:
 #   --version  VERSION   install a specific release tag (default: latest)
@@ -22,7 +22,7 @@
 set -eu
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-REPO="dep-shield/dep-shield"
+REPO="farzanini/dep-shield"
 INSTALL_DIR="/usr/local/bin"
 VERSION=""        # empty → fetch latest
 VERIFY=1          # 1 = verify checksums, 0 = skip

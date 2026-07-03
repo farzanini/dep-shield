@@ -37,8 +37,8 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/scanner"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/scanner"
 )
 
 // ── Public types ──────────────────────────────────────────────────────────────

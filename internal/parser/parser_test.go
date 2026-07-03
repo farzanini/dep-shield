@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/scanner"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/scanner"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────

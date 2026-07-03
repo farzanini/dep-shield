@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 // ── CVSS v3 base-score calculator ─────────────────────────────────────────────

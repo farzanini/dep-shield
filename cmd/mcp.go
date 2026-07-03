@@ -14,9 +14,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/mcp"
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/pipeline"
+	"github.com/farzanini/dep-shield/internal/mcp"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/pipeline"
 )
 
 func mcpCmd() *cobra.Command {

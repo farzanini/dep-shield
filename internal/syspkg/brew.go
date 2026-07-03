@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 // brewCollector enumerates Homebrew formulae. OSV has no Homebrew ecosystem, so

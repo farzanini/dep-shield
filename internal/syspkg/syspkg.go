@@ -24,7 +24,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 // runner executes a command and returns its stdout. It is a field on each

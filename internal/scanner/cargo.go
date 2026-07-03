@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 // cargoScanner reads Cargo.lock files produced by Rust's Cargo build tool.
