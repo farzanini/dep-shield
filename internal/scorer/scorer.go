@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -136,16 +137,36 @@ func filterBySeverity(vulns []models.Vulnerability, min models.Severity) []model
 }
 
 // buildFixAdvice produces a one-line fix suggestion string.
-// TODO: enrich with registry links once the parser provides package metadata.
 func buildFixAdvice(v models.Vulnerability) string {
-	if v.FixedIn == "" {
+	if v.FixedIn != "" {
 		return fmt.Sprintf(
-			"No fix available — consider replacing %s", v.AffectedPkg.Name)
+			"Upgrade %s from %s to %s",
+			v.AffectedPkg.Name,
+			v.AffectedPkg.Version,
+			v.FixedIn,
+		)
+	}
+	// System package advisories often omit a fixed version even though an
+	// upgrade path exists via the OS package manager, so don't suggest
+	// "replacing" a system library the way we might an abandoned library.
+	if isSystemEcosystem(v.AffectedPkg.Ecosystem) {
+		return fmt.Sprintf(
+			"No fixed version listed — update %s to the latest via your package manager",
+			v.AffectedPkg.Name)
 	}
 	return fmt.Sprintf(
-		"Upgrade %s from %s to %s",
-		v.AffectedPkg.Name,
-		v.AffectedPkg.Version,
-		v.FixedIn,
-	)
+		"No fixed version available yet — monitor for an update or consider replacing %s",
+		v.AffectedPkg.Name)
+}
+
+// isSystemEcosystem reports whether e is an OS package-manager ecosystem. The
+// distro ecosystems are release-specific strings (e.g. "Debian:12").
+func isSystemEcosystem(e models.Ecosystem) bool {
+	if e == models.EcosystemHomebrew {
+		return true
+	}
+	s := string(e)
+	return strings.HasPrefix(s, "Debian:") ||
+		strings.HasPrefix(s, "Ubuntu:") ||
+		strings.HasPrefix(s, "Alpine:")
 }

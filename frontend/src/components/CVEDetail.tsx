@@ -85,11 +85,20 @@ export default function CVEDetail({ pkg, onClose }: Props) {
             </button>
           </div>
 
-          {/* Fix command */}
+          {/* Fix command + where to run it */}
           {pkg.fixCommand && (
-            <div className="mt-3">
-              <p className="mb-1 text-xs text-gray-500">Recommended fix</p>
+            <div className="mt-3 flex flex-col gap-1.5">
+              <p className="text-xs text-gray-500">Recommended fix</p>
               <CopyableCommand command={pkg.fixCommand} />
+              {pkg.repoPath && (
+                <>
+                  <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-500">
+                    <TerminalIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                    Run it in this folder
+                  </p>
+                  <CopyableCommand command={pkg.repoPath} />
+                </>
+              )}
             </div>
           )}
         </div>
@@ -144,6 +153,15 @@ function VulnEntry({ vuln: v }: { vuln: ScoredVuln }) {
         )}
       </dl>
 
+      {/* Suggestion — always present; the scorer fills this for every finding,
+          even when no fixed version exists (e.g. Homebrew/NVD advisories). */}
+      {v.fixAdvice && (
+        <div className="mt-3 rounded bg-gray-900/60 px-3 py-2">
+          <p className="text-xs font-medium text-gray-500">Suggestion</p>
+          <p className="selectable mt-0.5 text-xs text-gray-300">{v.fixAdvice}</p>
+        </div>
+      )}
+
       {/* References */}
       {v.references.length > 0 && (
         <div className="mt-3">
@@ -195,7 +213,7 @@ function CopyableCommand({ command }: { command: string }) {
 
   return (
     <div className="flex items-center gap-2 rounded-md bg-gray-900 px-3 py-2">
-      <code className="selectable min-w-0 flex-1 truncate font-mono text-xs text-green-400">
+      <code className="selectable min-w-0 flex-1 truncate font-mono text-xs text-green-400" title={command}>
         {command}
       </code>
       <button
@@ -222,6 +240,16 @@ function CloseIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  );
+}
+
+function TerminalIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
     </svg>
   );
 }
