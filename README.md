@@ -95,15 +95,15 @@ dep-shield scan /path/to/project
 # Scan the current directory:
 dep-shield scan .
 
-# Exit with code 1 if any HIGH or CRITICAL vulnerabilities are found (useful in CI):
-dep-shield scan . --fail-on high
+# Only report HIGH and CRITICAL — scan exits 2 if any are found (useful in CI):
+dep-shield scan . --min-severity high
 ```
 
 dep-shield auto-detects which ecosystems are present by looking for lockfiles:
 
 | Ecosystem | Files detected |
 |---|---|
-| npm | `package-lock.json`, `yarn.lock` |
+| npm | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Go | `go.mod`, `go.sum` |
 | PyPI | `Pipfile.lock`, `poetry.lock`, `requirements.txt` |
 | Cargo | `Cargo.lock` |
@@ -122,23 +122,42 @@ dep-shield scan /path/to/project --system
 
 Linux distro packages are matched against OSV; Homebrew formulae are matched against NVD by CPE (set `NVD_API_KEY` for faster lookups).
 
-### Generate a report
+### Output formats & reports
 
 ```bash
-# JSON — machine-readable, for CI pipelines:
-dep-shield report --format json > vulns.json
+# Print JSON to stdout (machine-readable, for CI pipelines):
+dep-shield scan . --output json
 
-# Table — human-readable (default):
-dep-shield report --format table
+# Also write JSON and/or HTML report files while scanning:
+dep-shield scan . --json vulns.json --html report.html
+
+# Re-render a previously saved JSON result in another format:
+dep-shield report -i vulns.json --format html -o report.html
 ```
 
-### Global flags
+### Flags
+
+Common `scan` flags:
 
 ```
---timeout duration   abort scan after this duration (default 2m)
---offline            skip all network requests (no CVE data)
---log-level string   debug, info, warn, error (default "info")
+--min-severity string   lowest severity to report: LOW | MEDIUM | HIGH | CRITICAL (default LOW)
+--ecosystem strings     restrict to ecosystems: npm,go,cargo,pip
+--system                also scan system package managers (Homebrew, dpkg/apt, apk)
+--offline               skip all network requests (no CVE data)
+--timeout duration      abort the scan after this duration (default 30m)
+--json string           also write a JSON report to this file
+--html string           also write an HTML report to this file
 ```
+
+Global flags (all commands):
+
+```
+--output string   stdout format: table | json (default table)
+--no-colour       disable ANSI colours
+--debug           verbose debug logging
+```
+
+`scan` exits **2** when vulnerabilities are found and **0** when clean, so CI can fail the build on findings.
 
 ---
 
@@ -226,7 +245,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
 
       - name: Scan dependencies
-        run: dep-shield scan . --fail-on high
+        run: dep-shield scan . --min-severity high
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # optional: enriches results from GitHub Advisory DB
 ```
@@ -240,7 +259,7 @@ security-scan:
     - apk add --no-cache curl
     - curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
   script:
-    - dep-shield scan . --fail-on high
+    - dep-shield scan . --min-severity high
 ```
 
 ---
