@@ -93,7 +93,7 @@ export default function App() {
   return (
     <div className="flex h-full overflow-hidden bg-gray-900">
       {/* ── Sidebar ──────────────────────────────────────────────────────── */}
-      <aside className="flex w-72 flex-shrink-0 flex-col border-r border-gray-700 bg-gray-800">
+      <aside className="flex w-80 flex-shrink-0 flex-col border-r border-gray-700 bg-gray-800">
         {/* Title bar / drag region */}
         <div className="drag-region flex h-12 items-center gap-2.5 border-b border-gray-700 px-4">
           <ShieldIcon className="h-5 w-5 text-blue-400" />
