@@ -3,7 +3,7 @@ package cve
 import (
 	"testing"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 func TestNVDProduct(t *testing.T) {

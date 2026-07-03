@@ -5,7 +5,7 @@
 // Build a fully static binary (no C runtime, no shared libraries):
 //
 //	CGO_ENABLED=0 go build \
-//	  -ldflags="-s -w -X github.com/dep-shield/dep-shield/cmd.Version=v0.1.0" \
+//	  -ldflags="-s -w -X github.com/farzanini/dep-shield/cmd.Version=v0.1.0" \
 //	  -o dep-shield .
 //
 // The -s -w flags strip the symbol table and DWARF debug info, shrinking the
@@ -16,7 +16,7 @@ package main
 import (
 	"os"
 
-	"github.com/dep-shield/dep-shield/cmd"
+	"github.com/farzanini/dep-shield/cmd"
 )
 
 func main() {

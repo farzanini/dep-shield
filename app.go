@@ -39,13 +39,13 @@ import (
 	wailsrt "github.com/wailsapp/wails/v2/pkg/runtime"
 	"go.uber.org/zap"
 
-	"github.com/dep-shield/dep-shield/internal/cve"
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/parser"
-	"github.com/dep-shield/dep-shield/internal/reporter"
-	"github.com/dep-shield/dep-shield/internal/scanner"
-	"github.com/dep-shield/dep-shield/internal/scorer"
-	"github.com/dep-shield/dep-shield/internal/syspkg"
+	"github.com/farzanini/dep-shield/internal/cve"
+	"github.com/farzanini/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/parser"
+	"github.com/farzanini/dep-shield/internal/reporter"
+	"github.com/farzanini/dep-shield/internal/scanner"
+	"github.com/farzanini/dep-shield/internal/scorer"
+	"github.com/farzanini/dep-shield/internal/syspkg"
 )
 
 // ── Shared types (serialised to JSON for the frontend) ────────────────────────
@@ -756,7 +756,7 @@ func (a *App) runScan(ctx context.Context, path string) {
 	// package-lock.json, Cargo.lock, requirements.txt, …). This catches
 	// checkouts — e.g. a freshly cloned repo — that have lockfiles but no
 	// installed node_modules/site-packages for the store-based walk to find.
-	hits = mergeHits(hits, manifestHits(ctx, path, 8))
+	hits = scanner.MergeHits(hits, scanner.ManifestHits(ctx, path, 8))
 	if len(hits) != found {
 		found = len(hits)
 		progress(ScanProgress{

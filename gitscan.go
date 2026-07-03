@@ -3,17 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap"
-
-	"github.com/dep-shield/dep-shield/internal/models"
-	"github.com/dep-shield/dep-shield/internal/scanner"
 )
 
 // ── Remote git repositories ───────────────────────────────────────────────────
@@ -172,103 +167,4 @@ func looksLikeGitURL(s string) bool {
 		strings.HasPrefix(s, "https://") ||
 		strings.HasPrefix(s, "ssh://") ||
 		strings.HasPrefix(s, "git@")
-}
-
-// ── Manifest-based hit discovery ──────────────────────────────────────────────
-
-// manifestFiles maps a manifest/lockfile name to the ecosystem it identifies.
-// These are the committed files present in a checked-out repo even when no
-// packages are installed (no node_modules / site-packages).
-var manifestFiles = map[string]models.Ecosystem{
-	"package-lock.json": models.EcosystemNPM,
-	"yarn.lock":         models.EcosystemNPM,
-	"pnpm-lock.yaml":    models.EcosystemNPM,
-	"go.mod":            models.EcosystemGo,
-	"Cargo.lock":        models.EcosystemCargo,
-	"Pipfile.lock":      models.EcosystemPyPI,
-	"poetry.lock":       models.EcosystemPyPI,
-	"requirements.txt":  models.EcosystemPyPI,
-}
-
-// manifestHits walks root (bounded depth) looking for directories that contain
-// a committed manifest/lockfile, and returns DirHits using the Path convention
-// each parser expects:
-//
-//   - npm: the parser reads the lockfile from the hit's PARENT directory, so
-//     the hit points at <projectDir>/node_modules (which need not exist).
-//   - Go/Cargo/PyPI: the parser reads the manifest from the hit directory
-//     itself, so the hit points at <projectDir>.
-//
-// This is what lets dep-shield scan a freshly cloned repo — or any local
-// checkout — that has lockfiles but no installed dependency stores.
-func manifestHits(ctx context.Context, root string, maxDepth int) []scanner.DirHit {
-	var hits []scanner.DirHit
-	seen := map[string]bool{} // dedupe: one npm hit per project dir
-
-	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		// Abort the walk promptly if the scan was cancelled.
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			name := d.Name()
-			// Prune noise and installed-store subtrees — the store-based
-			// scanner already covers those, and they'd be slow to descend.
-			if path != root && (name == ".git" || name == "node_modules" ||
-				name == "vendor" || name == ".venv" || name == "site-packages" ||
-				name == "__pycache__" || name == "dist" || name == "build") {
-				return fs.SkipDir
-			}
-			if maxDepth > 0 {
-				if rel, rErr := filepath.Rel(root, path); rErr == nil {
-					depth := strings.Count(rel, string(filepath.Separator))
-					if rel != "." && depth >= maxDepth {
-						return fs.SkipDir
-					}
-				}
-			}
-			return nil
-		}
-
-		eco, ok := manifestFiles[d.Name()]
-		if !ok {
-			return nil
-		}
-		dir := filepath.Dir(path)
-		if eco == models.EcosystemNPM {
-			if seen[dir] {
-				return nil
-			}
-			seen[dir] = true
-			hits = append(hits, scanner.DirHit{
-				Path:      filepath.Join(dir, "node_modules"),
-				Ecosystem: eco,
-			})
-			return nil
-		}
-		hits = append(hits, scanner.DirHit{Path: dir, Ecosystem: eco})
-		return nil
-	})
-
-	return hits
-}
-
-// mergeHits appends manifest-derived hits to store-based hits, dropping any that
-// duplicate an existing (Ecosystem, Path) pair.
-func mergeHits(base, extra []scanner.DirHit) []scanner.DirHit {
-	seen := make(map[string]bool, len(base))
-	key := func(h scanner.DirHit) string { return string(h.Ecosystem) + "\x00" + h.Path }
-	for _, h := range base {
-		seen[key(h)] = true
-	}
-	for _, h := range extra {
-		if k := key(h); !seen[k] {
-			seen[k] = true
-			base = append(base, h)
-		}
-	}
-	return base
 }

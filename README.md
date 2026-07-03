@@ -28,34 +28,34 @@ Scanning /home/user/my-project
 ### Linux and macOS — one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
 ```
 
-The script auto-detects your OS and CPU architecture (amd64 or arm64), downloads the right binary from the [latest GitHub Release](https://github.com/dep-shield/dep-shield/releases/latest), verifies its sha256 checksum, and places the binary in `/usr/local/bin`.
+The script auto-detects your OS and CPU architecture (amd64 or arm64), downloads the right binary from the [latest GitHub Release](https://github.com/farzanini/dep-shield/releases/latest), verifies its sha256 checksum, and places the binary in `/usr/local/bin`.
 
 **Pin to a specific version:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh -s -- --version v1.2.3
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh -s -- --version v1.2.3
 ```
 
 **Install to a custom directory:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh -s -- --install-dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh -s -- --install-dir ~/.local/bin
 ```
 
 ### Windows — PowerShell
 
 ```powershell
-irm https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/farzanini/dep-shield/main/install.ps1 | iex
 ```
 
 *(PowerShell 5.1+ or PowerShell 7+ required.)*
 
 ### Manual download
 
-Download a pre-built binary for your platform from the [Releases page](https://github.com/dep-shield/dep-shield/releases):
+Download a pre-built binary for your platform from the [Releases page](https://github.com/farzanini/dep-shield/releases):
 
 | Platform | Architecture | File |
 |---|---|---|
@@ -74,10 +74,10 @@ sha256sum --check checksums.txt
 ### Build from source
 
 ```bash
-git clone https://github.com/dep-shield/dep-shield.git
+git clone https://github.com/farzanini/dep-shield.git
 cd dep-shield
 CGO_ENABLED=0 go build \
-  -ldflags="-s -w -X github.com/dep-shield/dep-shield/cmd.Version=$(git describe --tags --always)" \
+  -ldflags="-s -w -X github.com/farzanini/dep-shield/cmd.Version=$(git describe --tags --always)" \
   -o dep-shield .
 ```
 
@@ -95,35 +95,131 @@ dep-shield scan /path/to/project
 # Scan the current directory:
 dep-shield scan .
 
-# Exit with code 1 if any HIGH or CRITICAL vulnerabilities are found (useful in CI):
-dep-shield scan . --fail-on high
+# Only report HIGH and CRITICAL — scan exits 2 if any are found (useful in CI):
+dep-shield scan . --min-severity high
 ```
 
 dep-shield auto-detects which ecosystems are present by looking for lockfiles:
 
 | Ecosystem | Files detected |
 |---|---|
-| npm | `package-lock.json`, `yarn.lock` |
+| npm | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Go | `go.mod`, `go.sum` |
 | PyPI | `Pipfile.lock`, `poetry.lock`, `requirements.txt` |
 | Cargo | `Cargo.lock` |
 
-### Generate a report
+### Scan system packages
+
+Beyond project dependencies, dep-shield can scan packages installed by your OS package manager:
 
 ```bash
-# JSON — machine-readable, for CI pipelines:
-dep-shield report --format json > vulns.json
+# Scan Homebrew (macOS) / dpkg/apt / apk (Linux):
+dep-shield scan --system
 
-# Table — human-readable (default):
-dep-shield report --format table
+# Combine with a project scan:
+dep-shield scan /path/to/project --system
 ```
 
-### Global flags
+Linux distro packages are matched against OSV; Homebrew formulae are matched against NVD by CPE (set `NVD_API_KEY` for faster lookups).
+
+### Output formats & reports
+
+```bash
+# Print JSON to stdout (machine-readable, for CI pipelines):
+dep-shield scan . --output json
+
+# Also write JSON and/or HTML report files while scanning:
+dep-shield scan . --json vulns.json --html report.html
+
+# Re-render a previously saved JSON result in another format:
+dep-shield report -i vulns.json --format html -o report.html
+```
+
+### Flags
+
+Common `scan` flags:
 
 ```
---timeout duration   abort scan after this duration (default 2m)
---offline            skip all network requests (no CVE data)
---log-level string   debug, info, warn, error (default "info")
+--min-severity string   lowest severity to report: LOW | MEDIUM | HIGH | CRITICAL (default LOW)
+--ecosystem strings     restrict to ecosystems: npm,go,cargo,pip
+--system                also scan system package managers (Homebrew, dpkg/apt, apk)
+--offline               skip all network requests (no CVE data)
+--timeout duration      abort the scan after this duration (default 30m)
+--json string           also write a JSON report to this file
+--html string           also write an HTML report to this file
+```
+
+Global flags (all commands):
+
+```
+--output string   stdout format: table | json (default table)
+--no-colour       disable ANSI colours
+--debug           verbose debug logging
+```
+
+`scan` exits **2** when vulnerabilities are found and **0** when clean, so CI can fail the build on findings.
+
+---
+
+## MCP server — scan from AI agents
+
+dep-shield ships a [Model Context Protocol](https://modelcontextprotocol.io) server, so AI agents (Claude, and any MCP-compatible client) can scan projects and hosts for vulnerable packages as part of their work — e.g. auditing a repo they're editing and proposing the fixes.
+
+Start it over stdio:
+
+```bash
+dep-shield mcp
+```
+
+### Configure a client
+
+Most clients (Claude Desktop, etc.) use this config shape:
+
+```json
+{
+  "mcpServers": {
+    "dep-shield": {
+      "command": "dep-shield",
+      "args": ["mcp"],
+      "env": { "GITHUB_TOKEN": "ghp_…", "NVD_API_KEY": "…" }
+    }
+  }
+}
+```
+
+Use an absolute path to the binary if `dep-shield` isn't on the client's `PATH`. Both env vars are optional — `GITHUB_TOKEN` enriches results from the GitHub Advisory DB, `NVD_API_KEY` speeds up Homebrew lookups.
+
+For **Claude Code**:
+
+```bash
+claude mcp add dep-shield -- dep-shield mcp
+```
+
+### Tools
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `scan_project` | `path` (required), `min_severity`, `ecosystems` | Scan a local project directory for vulnerable dependencies (npm, Go, Cargo, PyPI). |
+| `scan_system_packages` | `min_severity` | Scan installed OS packages (Homebrew, dpkg/apt, apk). |
+
+Both return a JSON object:
+
+```json
+{
+  "scannedPaths": ["/path/to/project"],
+  "totalPackages": 241,
+  "vulnerabilityCount": 3,
+  "severityCounts": { "CRITICAL": 1, "HIGH": 2 },
+  "findings": [
+    {
+      "id": "CVE-2019-10744", "cve": "CVE-2019-10744",
+      "package": "lodash", "version": "4.17.11", "ecosystem": "npm",
+      "severity": "CRITICAL", "cvss": 9.1,
+      "fixedIn": "4.17.12", "fixAdvice": "Upgrade lodash from 4.17.11 to 4.17.12",
+      "summary": "Prototype pollution in lodash…"
+    }
+  ]
+}
 ```
 
 ---
@@ -146,10 +242,10 @@ jobs:
 
       - name: Install dep-shield
         run: |
-          curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+          curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
 
       - name: Scan dependencies
-        run: dep-shield scan . --fail-on high
+        run: dep-shield scan . --min-severity high
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # optional: enriches results from GitHub Advisory DB
 ```
@@ -161,9 +257,9 @@ security-scan:
   image: alpine:3.20
   before_script:
     - apk add --no-cache curl
-    - curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+    - curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
   script:
-    - dep-shield scan . --fail-on high
+    - dep-shield scan . --min-severity high
 ```
 
 ---
@@ -176,6 +272,7 @@ dep-shield queries two vulnerability databases and merges the results:
 |---|---|---|
 | [OSV.dev](https://osv.dev) | npm, Go, PyPI, Cargo, and 20+ more | None required |
 | [GitHub Advisory Database](https://github.com/advisories) | npm, Go, PyPI, Cargo, Ruby, Java | `GITHUB_TOKEN` env var (optional; enriches data) |
+| [NVD](https://nvd.nist.gov) | Homebrew formulae (CPE matching) | `NVD_API_KEY` env var (optional; raises the rate limit) |
 
 Deduplication: when the same CVE appears in both sources, dep-shield keeps the entry with the higher CVSS score so the risk picture is never understated.
 
@@ -187,8 +284,8 @@ Every release publishes `checksums.txt` signed with the project's GPG key.
 
 ```bash
 # 1. Download the binary and checksums
-curl -fsSL -O https://github.com/dep-shield/dep-shield/releases/download/v1.2.3/dep-shield_v1.2.3_linux_amd64.tar.gz
-curl -fsSL -O https://github.com/dep-shield/dep-shield/releases/download/v1.2.3/checksums.txt
+curl -fsSL -O https://github.com/farzanini/dep-shield/releases/download/v1.2.3/dep-shield_v1.2.3_linux_amd64.tar.gz
+curl -fsSL -O https://github.com/farzanini/dep-shield/releases/download/v1.2.3/checksums.txt
 
 # 2. Verify the sha256 checksum
 sha256sum --check --ignore-missing checksums.txt
@@ -204,7 +301,7 @@ tar -xzf dep-shield_v1.2.3_linux_amd64.tar.gz
 
 ```bash
 # Clone
-git clone https://github.com/dep-shield/dep-shield.git
+git clone https://github.com/farzanini/dep-shield.git
 cd dep-shield
 
 # Run all Go tests

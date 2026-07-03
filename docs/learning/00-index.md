@@ -147,7 +147,7 @@ encounter *specifically in that file* — not things borrowed from imports.
 
 ```
 goroutine 1 [running]:
-github.com/dep-shield/dep-shield/internal/scanner.(*impl).Scan(...)
+github.com/farzanini/dep-shield/internal/scanner.(*impl).Scan(...)
     internal/scanner/scanner.go:292
 ```
 

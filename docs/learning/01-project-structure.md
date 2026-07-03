@@ -29,7 +29,7 @@ run commands in a terminal. No prior Go knowledge required.
 Open `go.mod`. Here is the whole file:
 
 ```
-module github.com/dep-shield/dep-shield
+module github.com/farzanini/dep-shield
 
 go 1.25.0
 
@@ -52,7 +52,7 @@ There are four things to understand here.
 ### 1a. The module name
 
 ```
-module github.com/dep-shield/dep-shield
+module github.com/farzanini/dep-shield
 ```
 
 This is the **module path** — a globally unique name for the whole project.
@@ -61,11 +61,11 @@ to import each other. But it does *not* need to be a real website. It is just
 a name that will never collide with anyone else's module.
 
 Every `import` statement inside dep-shield that starts with
-`github.com/dep-shield/dep-shield/` refers to *this* project, not the internet.
+`github.com/farzanini/dep-shield/` refers to *this* project, not the internet.
 
 ```go
 // In cmd/scan.go — importing our own internal/parser package:
-import "github.com/dep-shield/dep-shield/internal/parser"
+import "github.com/farzanini/dep-shield/internal/parser"
 //      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  this module
 //                                        ^^^^^^^^^^^^^^^ this sub-directory
 ```
@@ -169,7 +169,7 @@ query logic, or swap the scoring algorithm without touching the reporter.
 parent directory and its children.
 
 For dep-shield, the parent of `internal/` is the module root
-(`github.com/dep-shield/dep-shield`). So:
+(`github.com/farzanini/dep-shield`). So:
 
 ```
 ✅  cmd/scan.go       can import  internal/parser
@@ -179,11 +179,11 @@ For dep-shield, the parent of `internal/` is the module root
 ❌  github.com/someone-else/their-tool  CANNOT import  internal/parser
 ```
 
-If someone writes a Go program that tries to `import "github.com/dep-shield/dep-shield/internal/parser"`,
+If someone writes a Go program that tries to `import "github.com/farzanini/dep-shield/internal/parser"`,
 the Go compiler refuses with:
 
 ```
-use of internal package github.com/dep-shield/dep-shield/internal/parser
+use of internal package github.com/farzanini/dep-shield/internal/parser
 not allowed
 ```
 
@@ -213,7 +213,7 @@ package main                              // ← (1)
 
 import (
     "os"
-    "github.com/dep-shield/dep-shield/cmd"
+    "github.com/farzanini/dep-shield/cmd"
 )
 
 func main() {                             // ← (2)
@@ -289,7 +289,7 @@ It applies to: types, functions, methods, variables, constants, and struct field
 
 ```go
 // In cmd/scan.go:
-import "github.com/dep-shield/dep-shield/internal/parser"
+import "github.com/farzanini/dep-shield/internal/parser"
 
 // Now we can use everything exported from package parser:
 p := parser.New(log)              // call exported function
@@ -297,7 +297,7 @@ pkgs, err := p.ParseAll(ctx, hits) // call method on returned value
 ```
 
 The import path is the module name + the directory path from the module root.
-`internal/parser` → `github.com/dep-shield/dep-shield/internal/parser`.
+`internal/parser` → `github.com/farzanini/dep-shield/internal/parser`.
 
 ---
 
@@ -545,7 +545,7 @@ in the current directory. Run it directly:
 
 ```bash
 CGO_ENABLED=0 go build \
-  -ldflags="-s -w -X github.com/dep-shield/dep-shield/cmd.Version=v0.1.0" \
+  -ldflags="-s -w -X github.com/farzanini/dep-shield/cmd.Version=v0.1.0" \
   -o dep-shield .
 ```
 
@@ -627,7 +627,7 @@ our project when `scanner.go` was rewritten with the new `Walker` API.
 **Diagnosis steps:**
 ```bash
 # 1. Find what the package actually exports:
-go doc github.com/dep-shield/dep-shield/internal/scanner
+go doc github.com/farzanini/dep-shield/internal/scanner
 
 # 2. Search for the old function name:
 grep -r "Deduplicate" ./internal/scanner/
@@ -703,7 +703,7 @@ func (n *npmParser) Parse(ctx context.Context, dir string) ([]models.Package, er
 ### Error: `use of internal package … not allowed`
 
 ```
-use of internal package github.com/dep-shield/dep-shield/internal/parser not allowed
+use of internal package github.com/farzanini/dep-shield/internal/parser not allowed
 ```
 
 **Cause:** Something *outside* the module (a different project on your machine)
@@ -786,7 +786,7 @@ package main
 
 import (
     "fmt"
-    "github.com/dep-shield/dep-shield/internal/models"
+    "github.com/farzanini/dep-shield/internal/models"
 )
 
 func main() {
@@ -795,7 +795,7 @@ func main() {
 EOF
 cd /tmp/test-import
 go mod init test-import
-go mod edit -replace github.com/dep-shield/dep-shield=/path/to/your/dep-shield
+go mod edit -replace github.com/farzanini/dep-shield=/path/to/your/dep-shield
 go mod tidy
 go build .
 EOF
@@ -804,10 +804,10 @@ EOF
 You will see:
 
 ```
-use of internal package github.com/dep-shield/dep-shield/internal/models not allowed
+use of internal package github.com/farzanini/dep-shield/internal/models not allowed
 ```
 
-Now try importing `github.com/dep-shield/dep-shield/cmd` instead (which is *not*
+Now try importing `github.com/farzanini/dep-shield/cmd` instead (which is *not*
 inside `internal/`). It will work. This is the exact boundary that `internal/`
 enforces.
 

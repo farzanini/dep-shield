@@ -3,7 +3,7 @@ package models_test
 import (
 	"testing"
 
-	"github.com/dep-shield/dep-shield/internal/models"
+	"github.com/farzanini/dep-shield/internal/models"
 )
 
 func TestSeverityRank(t *testing.T) {

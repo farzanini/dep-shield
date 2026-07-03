@@ -347,7 +347,7 @@ panic**:
 ```
 panic: send on closed channel
 goroutine 17 [running]:
-github.com/dep-shield/dep-shield/internal/scanner.(*impl).walkRoot(...)
+github.com/farzanini/dep-shield/internal/scanner.(*impl).walkRoot(...)
     .../internal/scanner/scanner.go:551
 ```
 
@@ -868,7 +868,7 @@ forever in a send or receive:
 
 ```
 goroutine 42 [chan receive, 2 minutes]:    ← stuck receiving for 2 minutes
-github.com/dep-shield/dep-shield/internal/scanner.(*impl).Scan.func1.1()
+github.com/farzanini/dep-shield/internal/scanner.(*impl).Scan.func1.1()
     .../internal/scanner/scanner.go:315 +0x84
 ```
 
@@ -908,7 +908,7 @@ main.main()
         .../cmd/dep-shield/main.go:15 +0x7c
 
 goroutine 7 [chan send]:
-github.com/dep-shield/dep-shield/internal/scanner.(*impl).walkRoot(...)
+github.com/farzanini/dep-shield/internal/scanner.(*impl).walkRoot(...)
         .../internal/scanner/scanner.go:551 +0x1a4
 ```
 

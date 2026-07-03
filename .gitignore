@@ -1,6 +1,7 @@
 # Compiled binaries / build output
 /dep-shield
 /build/bin/
+/dist/
 
 # Generated knowledge graph (rebuild with `graphify update .`)
 /graphify-out/
@@ -10,3 +11,4 @@
 
 # Scratch reports
 /app_state_report.md
+/frontend/dep-shield

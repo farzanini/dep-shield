@@ -19,7 +19,7 @@ before:
 # ── Build matrix ─────────────────────────────────────────────────────────────
 builds:
   - id: dep-shield
-    # Root main.go imports github.com/dep-shield/dep-shield/cmd — matches the
+    # Root main.go imports github.com/farzanini/dep-shield/cmd — matches the
     # build command in main.go's package comment.
     main: .
     binary: dep-shield
@@ -28,7 +28,7 @@ builds:
     # real tag rather than the "dev" fallback.
     ldflags:
       - -s -w
-      - -X github.com/dep-shield/dep-shield/cmd.Version={{ .Version }}
+      - -X github.com/farzanini/dep-shield/cmd.Version={{ .Version }}
 
     env:
       - CGO_ENABLED=0   # fully static, no C runtime dependency
@@ -70,6 +70,7 @@ archives:
       - LICENSE*
       - README.md
       - install.sh
+      - install.ps1
 
 # ── Checksums ────────────────────────────────────────────────────────────────
 checksum:
@@ -79,7 +80,7 @@ checksum:
 # ── GitHub Release ────────────────────────────────────────────────────────────
 release:
   github:
-    owner: dep-shield
+    owner: farzanini
     name: dep-shield
 
   # Populate release notes from the matching section in CHANGELOG.md, falling
@@ -89,12 +90,12 @@ release:
 
     **Install (Linux/macOS):**
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/farzanini/dep-shield/main/install.sh | sh
     ```
 
     **Install (Windows — PowerShell):**
     ```powershell
-    irm https://raw.githubusercontent.com/dep-shield/dep-shield/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/farzanini/dep-shield/main/install.ps1 | iex
     ```
 
   footer: |
