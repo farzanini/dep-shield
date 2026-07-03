@@ -70,6 +70,7 @@ archives:
       - LICENSE*
       - README.md
       - install.sh
+      - install.ps1
 
 # ── Checksums ────────────────────────────────────────────────────────────────
 checksum:
@@ -79,7 +80,7 @@ checksum:
 # ── GitHub Release ────────────────────────────────────────────────────────────
 release:
   github:
-    owner: dep-shield
+    owner: farzanini
     name: dep-shield
 
   # Populate release notes from the matching section in CHANGELOG.md, falling
